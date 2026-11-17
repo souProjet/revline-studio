@@ -69,8 +69,7 @@ export interface HudOptions {
   leanAlertDeg: number;
   gMeterMax: number;
   trailMeters: number;
-  /** null = never hide */
-  redactAboveKmh: number | null;
+  /** How the speed is hidden when riding above the privacy speed limit. */
   redactStyle: "REDACTED" | "BLUR";
 }
 
@@ -90,7 +89,6 @@ export const DEFAULT_HUD: HudOptions = {
   leanAlertDeg: 45,
   gMeterMax: 1.2,
   trailMeters: 500,
-  redactAboveKmh: 110,
   redactStyle: "REDACTED",
 };
 
@@ -215,8 +213,18 @@ interface Ink {
   alert: string;
 }
 
-/** Draws onto a canvas of any size with the layout's aspect; it is scaled to fill it. */
-export function drawHud(ctx: CanvasRenderingContext2D, track: TelemetryTrack, tMs: number, o: HudOptions, l: HudLayout): void {
+/**
+ * Draws onto a canvas of any size with the layout's aspect; it is scaled to fill it.
+ * `hideSpeedAbove`: km/h above which the speed readout is hidden, null to always show it.
+ */
+export function drawHud(
+  ctx: CanvasRenderingContext2D,
+  track: TelemetryTrack,
+  tMs: number,
+  o: HudOptions,
+  l: HudLayout,
+  hideSpeedAbove: number | null,
+): void {
   const px = ctx.canvas.width / l.w;
   ctx.setTransform(px, 0, 0, px, 0, 0);
   ctx.clearRect(0, 0, l.w, l.h);
@@ -245,7 +253,7 @@ export function drawHud(ctx: CanvasRenderingContext2D, track: TelemetryTrack, tM
   place("horizon", () => drawHorizon(ctx, f, o, ink));
   place("gMeter", () => drawGMeter(ctx, track, i, o, ink));
   place("miniMap", () => drawMiniMap(ctx, track, i, o, ink));
-  place("speed", () => drawSpeed(ctx, f, o, ink));
+  place("speed", () => drawSpeed(ctx, f, o, ink, hideSpeedAbove));
   place("spectrum", () => drawSpectrum(ctx, f, ink));
 }
 
@@ -409,10 +417,10 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, track: TelemetryTrack, i: nu
   ctx.fill();
 }
 
-function drawSpeed(ctx: CanvasRenderingContext2D, f: TelemetryFrame, o: HudOptions, ink: Ink) {
+function drawSpeed(ctx: CanvasRenderingContext2D, f: TelemetryFrame, o: HudOptions, ink: Ink, hideAbove: number | null) {
   const mph = o.units === "MPH";
   const value = Math.round(mph ? f.speed_kmh * 0.621371 : f.speed_kmh);
-  const redact = o.redactAboveKmh !== null && f.speed_kmh > o.redactAboveKmh;
+  const redact = hideAbove !== null && f.speed_kmh > hideAbove;
   ctx.textAlign = "left";
   if (redact && o.redactStyle === "REDACTED") {
     ctx.fillStyle = ink.main;

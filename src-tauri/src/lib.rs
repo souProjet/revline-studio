@@ -2,12 +2,20 @@
 
 pub mod audio_analyzer;
 pub mod ingest;
+pub mod plates;
 pub mod render_pipeline;
 pub mod system;
 pub mod telemetry;
 pub mod types;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use anyhow::Context;
 use serde::Serialize;
@@ -15,7 +23,7 @@ use tauri::{ipc::InvokeBody, AppHandle, Emitter, Manager, RunEvent, State};
 use tokio::{process::Child, sync::Mutex};
 
 use audio_analyzer::{ClipContext, ExhaustAnalysis, SyncResult, Waveform};
-use render_pipeline::{EncodeStats, RenderJob, RenderProcess};
+use render_pipeline::{EncodeStats, PlatePass, RenderJob, RenderProcess};
 use telemetry::TelemetrySummary;
 use types::{AudioMode, ProjectSource, SmartClip, TelemetryFrame, TELEMETRY_HZ};
 
@@ -30,6 +38,8 @@ struct AppState {
     /// Full 60 Hz series of the analyzed source; the UI pulls clip-sized windows.
     telemetry: Mutex<Vec<TelemetryFrame>>,
     renders: Mutex<HashMap<String, RenderProcess>>,
+    /// Cancel flags of renders still downloading the plate model or detecting plates.
+    preparing: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// `nvidia-smi dmon` while at least one render runs.
     gpu_monitor: Mutex<Option<Child>>,
 }
@@ -183,10 +193,40 @@ async fn render_start(app: AppHandle, state: State<'_, AppState>, job: RenderJob
     };
     emit("PREPARING", 0, EncodeStats::default());
     let work_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("render");
-    let prepared = {
+    let cancel = Arc::new(AtomicBool::new(false));
+    state.preparing.lock().await.insert(job_id.clone(), cancel.clone());
+    let prepared = async {
+        let plate_pass = if job.settings.privacy.plates {
+            let dir = app.path().app_data_dir()?.join("models");
+            let (app2, id2) = (app.clone(), job_id.clone());
+            let model = tokio::task::spawn_blocking(move || {
+                plates::ensure_model(&dir, &|f| {
+                    let stats = EncodeStats { frame: (f * 100.0).round() as usize, ..EncodeStats::default() };
+                    let _ = app2.emit("render-progress", RenderProgress { job_id: id2.clone(), stage: "DOWNLOADING", total: 100, stats });
+                })
+            })
+            .await??;
+            let (app2, id2) = (app.clone(), job_id.clone());
+            Some(PlatePass {
+                model,
+                cancel: cancel.clone(),
+                on_progress: Arc::new(move |done, total| {
+                    let stats = EncodeStats { frame: done, ..EncodeStats::default() };
+                    let _ = app2.emit("render-progress", RenderProgress { job_id: id2.clone(), stage: "DETECTING", total, stats });
+                }),
+            })
+        } else {
+            None
+        };
+        if cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("canceled");
+        }
         let frames = state.telemetry.lock().await.clone();
-        render_pipeline::prepare(&job, &frames, &work_dir).await.map_err(err)?
-    };
+        render_pipeline::prepare(&job, &frames, &work_dir, plate_pass.as_ref()).await
+    }
+    .await;
+    state.preparing.lock().await.remove(&job_id);
+    let prepared = prepared.map_err(err)?;
     let (total, needs_hud_frames) = (prepared.frame_count, prepared.needs_hud_frames);
     emit("ENCODING", total, EncodeStats::default());
     let (app2, id2) = (app.clone(), job_id.clone());
@@ -229,6 +269,9 @@ async fn render_finish(state: State<'_, AppState>, job_id: String) -> CmdResult<
 
 #[tauri::command]
 async fn render_cancel(state: State<'_, AppState>, job_id: String) -> CmdResult<()> {
+    if let Some(flag) = state.preparing.lock().await.get(&job_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
     let p = state.renders.lock().await.remove(&job_id);
     if let Some(p) = p {
         p.cancel().await;

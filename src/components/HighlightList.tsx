@@ -61,7 +61,7 @@ export default function HighlightList({ clips, actionScore, selectedId, queued, 
                     checked={queued.has(c.id)}
                     onChange={(e) => onToggleQueue(c.id, e.target.checked)}
                   />
-                  Render
+                  Export
                 </label>
               </div>
             </div>

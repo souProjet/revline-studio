@@ -2,44 +2,6 @@
 
 import { useId } from "react";
 
-export function Section({
-  title,
-  children,
-  aside,
-  collapsible = false,
-}: {
-  title: string;
-  children: React.ReactNode;
-  aside?: React.ReactNode;
-  collapsible?: boolean;
-}) {
-  if (collapsible) {
-    return (
-      <details open className="group border-b border-hairline last:border-b-0">
-        <summary className="flex cursor-pointer list-none items-baseline justify-between px-4 py-4 marker:hidden hover:bg-[#27282b] [&::-webkit-details-marker]:hidden">
-          <span className="flex items-center gap-2 text-[14px] font-semibold">
-            <svg width="10" height="10" viewBox="0 0 10 10" className="text-muted transition-transform duration-150 group-open:rotate-90" aria-hidden>
-              <path d="M3 1l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.5" />
-            </svg>
-            {title}
-          </span>
-          {aside && <span className="text-[12px] text-muted">{aside}</span>}
-        </summary>
-        <div className="space-y-3 px-4 pb-4">{children}</div>
-      </details>
-    );
-  }
-  return (
-    <section className="border-b border-hairline px-4 py-4 last:border-b-0">
-      <div className="mb-3 flex items-baseline justify-between">
-        <h2 className="text-[14px] font-semibold text-fg">{title}</h2>
-        {aside && <span className="text-[12px] text-muted">{aside}</span>}
-      </div>
-      <div className="space-y-3">{children}</div>
-    </section>
-  );
-}
-
 export function Button({
   children,
   variant = "secondary",
@@ -255,5 +217,62 @@ export function RadioList<T extends string>({
         ))}
       </div>
     </fieldset>
+  );
+}
+
+/** A labeled group of controls. */
+export function Field({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[12px] text-muted">{label}</p>
+      {children}
+      {hint && <p className="text-[12px] text-muted">{hint}</p>}
+    </div>
+  );
+}
+
+/** A titled block inside a panel, separated from the next by space rather than a box. */
+export function Group({ title, aside, children }: { title: string; aside?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <section className="space-y-3 border-b border-hairline px-4 py-4 last:border-b-0">
+      <div className="flex items-baseline justify-between">
+        <h3 className="font-cond text-[15px] font-semibold tracking-[0.01em] text-fg">{title}</h3>
+        {aside && <span className="text-[12px] text-muted">{aside}</span>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+export function Tabs<T extends string>({
+  label,
+  value,
+  tabs,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  tabs: [T, string, boolean?][];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div role="tablist" aria-label={label} className="flex gap-1 border-b border-hairline px-3">
+      {tabs.map(([v, l, dot]) => (
+        <button
+          key={v}
+          type="button"
+          role="tab"
+          aria-selected={v === value}
+          onClick={() => onChange(v)}
+          className={`relative flex h-11 items-center gap-1.5 px-2.5 text-[13px] transition-colors duration-150 ${
+            v === value ? "font-medium text-fg" : "text-muted hover:text-fg"
+          }`}
+        >
+          {l}
+          {dot && <span className="h-1.5 w-1.5 rounded-full bg-straw" aria-label="active" />}
+          {v === value && <span className="absolute inset-x-2 -bottom-px h-[2px] bg-straw" aria-hidden />}
+        </button>
+      ))}
+    </div>
   );
 }

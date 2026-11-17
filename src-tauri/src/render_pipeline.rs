@@ -16,7 +16,10 @@ use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use anyhow::{bail, Context, Result};
@@ -28,6 +31,7 @@ use tokio::{
 };
 
 use crate::{
+    plates,
     telemetry::{v360_ypr, view_matrix},
     types::{AudioMode, CameraAngle, ProjectSource, SmartClip, TelemetryFrame, TELEMETRY_HZ},
 };
@@ -114,6 +118,37 @@ pub fn bitrate_mbps(width: u32, height: u32, fps: u32, quality: Quality, codec: 
     (mbps.round() as u32).clamp(4, 150)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BlurWhen {
+    Off,
+    AboveLimit,
+    Always,
+}
+
+/// A fixed spot in one lens image, such as the bike's dashboard when the camera is mounted on
+/// the bike: it stays put in the fisheye image whatever the view does.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LensSpot {
+    pub lens: CameraAngle,
+    /// Center, 0..1 across and down the lens image.
+    pub u: f64,
+    pub v: f64,
+    /// Half-size, fraction of the lens image width.
+    pub radius: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrivacySettings {
+    /// GPS speed above which the speed readout is hidden and the dashboard can be blurred.
+    pub speed_limit_kmh: f64,
+    /// Hide the HUD speed above the limit (drawn by the frontend).
+    pub hide_hud_speed: bool,
+    pub dashboard: BlurWhen,
+    pub dashboard_spot: Option<LensSpot>,
+    pub plates: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderSettings {
     pub camera_mode: CameraMode,
@@ -137,6 +172,7 @@ pub struct RenderSettings {
     /// Constant view tilt, negative = look down at the road.
     pub pitch_offset_deg: f64,
     pub sound: SoundSettings,
+    pub privacy: PrivacySettings,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +193,8 @@ enum FisheyeLayout {
 
 struct Probe {
     layout: FisheyeLayout,
+    /// Side of one square lens image, px.
+    lens_px: u32,
     audio_channels: u32,
 }
 
@@ -179,9 +217,9 @@ async fn ffprobe(path: &Path) -> Result<Probe> {
         .filter_map(|s| Some((s["width"].as_u64()?, s["height"].as_u64()?)))
         .filter(|(w, _)| *w >= 1_000) // skip thumbnails / preview tracks
         .collect();
-    let layout = match videos.as_slice() {
-        [(w0, h0), (w1, h1), ..] if w0 == h0 && w0 == w1 && h0 == h1 => FisheyeLayout::DualStream,
-        [(w, h), ..] if *w == 2 * *h => FisheyeLayout::SideBySide,
+    let (layout, lens_px) = match videos.as_slice() {
+        [(w0, h0), (w1, h1), ..] if w0 == h0 && w0 == w1 && h0 == h1 => (FisheyeLayout::DualStream, *w0 as u32),
+        [(w, h), ..] if *w == 2 * *h => (FisheyeLayout::SideBySide, *h as u32),
         other => bail!("unsupported .insv video layout {other:?} (expected dual fisheye)"),
     };
     let audio_channels = streams
@@ -189,7 +227,7 @@ async fn ffprobe(path: &Path) -> Result<Probe> {
         .find(|s| s["codec_type"] == "audio")
         .and_then(|s| s["channels"].as_u64())
         .context("the .insv has no audio stream")? as u32;
-    Ok(Probe { layout, audio_channels })
+    Ok(Probe { layout, lens_px, audio_channels })
 }
 
 /// Filtergraph option values are single-quoted; reject the characters that would need
@@ -229,6 +267,52 @@ fn view_ypr(job: &RenderJob, telemetry: &[TelemetryFrame], t_ms: f64) -> (f64, f
         t[r] = [row[0], row[1] * cs + row[2] * sn, -row[1] * sn + row[2] * cs];
     }
     v360_ypr(&t)
+}
+
+/// Clip-relative seconds where GPS speed exceeds `limit_kmh`, padded by half a second and
+/// with gaps under a second merged, so the blur never flickers on and off.
+fn speeding_spans(telemetry: &[TelemetryFrame], start_ms: f64, dur_s: f64, limit_kmh: f64) -> Vec<(f64, f64)> {
+    const PAD: f64 = 0.5;
+    let mut spans: Vec<(f64, f64)> = Vec::new();
+    let first = (start_ms * TELEMETRY_HZ / 1000.0).floor().max(0.0) as usize;
+    let last = ((start_ms + dur_s * 1000.0) * TELEMETRY_HZ / 1000.0).ceil() as usize;
+    for f in telemetry.iter().take(last + 1).skip(first) {
+        if f.speed_kmh <= limit_kmh {
+            continue;
+        }
+        let t = (f.timestamp_ms - start_ms) / 1000.0;
+        let (a, b) = ((t - PAD).max(0.0), (t + PAD).min(dur_s));
+        match spans.last_mut() {
+            Some(last) if a - last.1 < 1.0 => last.1 = b,
+            _ => spans.push((a, b)),
+        }
+    }
+    spans
+}
+
+/// Blurs a fixed spot of the dual-fisheye input, before reprojection, from `[dfin]` to the
+/// chain's continuation. `None` when there is nothing to blur in this clip.
+fn lens_blur(spot: &LensSpot, lens_px: u32, spans: Option<&[(f64, f64)]>) -> Option<String> {
+    let enable = match spans {
+        Some([]) => return None,
+        Some(sp) => {
+            let terms: Vec<String> = sp.iter().map(|(a, b)| format!("between(t,{a:.3},{b:.3})")).collect();
+            format!(":enable='{}'", terms.join("+"))
+        }
+        None => String::new(),
+    };
+    let lens = f64::from(lens_px);
+    let x0 = if spot.lens == CameraAngle::Rear { lens } else { 0.0 };
+    let half = (spot.radius.clamp(0.01, 0.25) * lens).max(8.0);
+    let even = |v: f64| ((v / 2.0).floor() * 2.0).max(0.0) as u32;
+    let size = even(2.0 * half).max(16);
+    let x = even((x0 + spot.u.clamp(0.0, 1.0) * lens - half).clamp(x0, x0 + lens - f64::from(size)));
+    let y = even((spot.v.clamp(0.0, 1.0) * lens - half).clamp(0.0, lens - f64::from(size)));
+    let r = (size / 5).clamp(4, 120);
+    Some(format!(
+        "[dfin]split[dfa][dfb];[dfb]crop={size}:{size}:{x}:{y},boxblur=lr={r}:lp=3:cr={cr}:cp=3[dfbl];[dfa][dfbl]overlay={x}:{y}{enable}",
+        cr = (r / 2).max(2),
+    ))
 }
 
 fn wrap_deg(d: f64) -> f64 {
@@ -393,6 +477,76 @@ fn encoder_args(codec: VideoCodec, bitrate_mbps: u32) -> Result<Vec<String>> {
     Ok(a)
 }
 
+/// Plate detection rate and the long side of the frames it looks at.
+const DETECT_FPS: u32 = 10;
+const DETECT_LONG_PX: u32 = 1280;
+
+/// What the license-plate pass needs: the model on disk, a cancel flag, and a callback with
+/// (frames looked at, total).
+pub struct PlatePass {
+    pub model: PathBuf,
+    pub cancel: Arc<AtomicBool>,
+    pub on_progress: Arc<dyn Fn(usize, usize) + Send + Sync>,
+}
+
+/// Runs ffmpeg with `args` (raw RGB frames of `w`x`h` on stdout) and the plate detector on
+/// every frame. Returns (time in s, boxes in those frames' pixels) per frame.
+async fn detect_plates(pass: &PlatePass, args: Vec<OsString>, w: u32, h: u32, total: usize) -> Result<Vec<(f64, Vec<plates::PlateBox>)>> {
+    let (model, cancel, on_progress) = (pass.model.clone(), pass.cancel.clone(), pass.on_progress.clone());
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read as _;
+        let mut detector = plates::Detector::load(&model)?;
+        let mut child = std::process::Command::new("ffmpeg")
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("could not start ffmpeg; is it installed and on PATH?")?;
+        let mut out = child.stdout.take().context("ffmpeg stdout")?;
+        let mut frame = vec![0u8; w as usize * h as usize * 3];
+        let mut dets = Vec::with_capacity(total);
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("canceled");
+            }
+            match out.read_exact(&mut frame) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+            let boxes = detector.detect(&frame, w as usize, h as usize)?;
+            dets.push((dets.len() as f64 / f64::from(DETECT_FPS), boxes));
+            on_progress(dets.len(), total);
+        }
+        let mut log = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_string(&mut log);
+        }
+        if !child.wait()?.success() {
+            bail!("plate detection pass failed: {}", tail(&log, 6));
+        }
+        Ok(dets)
+    })
+    .await?
+}
+
+/// Filter chain (appended to a video chain) that pixelates the boxes `plate_file` moves.
+fn plate_blur(w: u32, h: u32, fps: u32, plate_file: &Path) -> Result<String> {
+    let slots: Vec<String> = (0..plates::SLOTS).map(|n| format!("drawbox@p{n}=x=-64:y=-64:w=8:h=8:color=white:t=fill")).collect();
+    Ok(format!(
+        ",split[pva][pvb];[pvb]scale={pw}:{ph}:flags=area,scale={w}:{h}:flags=neighbor[pvp];\
+         color=c=black:s={w}x{h}:r={fps},format=gray,sendcmd=f={pf},{slots}[pvm];\
+         [pvp][pvm]alphamerge[pvpa];[pva][pvpa]overlay=0:0:shortest=1",
+        pw = (w / 16).max(2),
+        ph = (h / 16).max(2),
+        pf = quoted(plate_file)?,
+        slots = slots.join(","),
+    ))
+}
+
 pub struct PreparedRender {
     pub args: Vec<OsString>,
     pub frame_count: usize,
@@ -403,7 +557,7 @@ pub struct PreparedRender {
 
 /// Probes, writes the camera script into `work_dir`, runs the loudness pass, and returns the
 /// final ffmpeg argument list. ffmpeg writes to `<output>.part` until it succeeds.
-pub async fn prepare(job: &RenderJob, telemetry: &[TelemetryFrame], work_dir: &Path) -> Result<PreparedRender> {
+pub async fn prepare(job: &RenderJob, telemetry: &[TelemetryFrame], work_dir: &Path, plate_pass: Option<&PlatePass>) -> Result<PreparedRender> {
     let s = &job.settings;
     let src = &job.source;
     let dur_s = (job.clip.end_ms - job.clip.start_ms) / 1000.0;
@@ -464,7 +618,7 @@ pub async fn prepare(job: &RenderJob, telemetry: &[TelemetryFrame], work_dir: &P
     if s.hwaccel_decode {
         args.extend(["-hwaccel", HWACCEL].map(OsString::from));
     }
-    args.extend(insv_in);
+    args.extend(insv_in.iter().cloned());
     let hud_idx = if s.hud {
         args.extend(["-thread_queue_size", "1024", "-f", "image2pipe", "-framerate"].map(OsString::from));
         args.extend([s.fps.to_string().into(), OsString::from("-c:v"), "png".into(), "-i".into(), "pipe:0".into()]);
@@ -477,28 +631,70 @@ pub async fn prepare(job: &RenderJob, telemetry: &[TelemetryFrame], work_dir: &P
         args.extend(voice_in);
     }
 
-    // Square canvas that still covers the output at any roll (its diagonal), with the focal
-    // length the field of view gives across the short side.
-    let canvas = (f64::from(w).hypot(f64::from(h)) / 2.0).ceil() as u32 * 2 + 4;
-    let focal = f64::from(w.min(h)) / 2.0 / (s.h_fov_deg.clamp(40.0, 130.0).to_radians() / 2.0).tan();
-    let canvas_fov = 2.0 * (f64::from(canvas) / 2.0 / focal).atan().to_degrees();
-    let mut g = String::new();
-    match probe.layout {
-        FisheyeLayout::DualStream => g.push_str("[0:v:0][0:v:1]hstack=inputs=2,"),
-        FisheyeLayout::SideBySide => g.push_str("[0:v:0]"),
+    let pv = &s.privacy;
+    let dash = match (pv.dashboard, &pv.dashboard_spot) {
+        (BlurWhen::Always, Some(spot)) => lens_blur(spot, probe.lens_px, None),
+        (BlurWhen::AboveLimit, Some(spot)) => {
+            lens_blur(spot, probe.lens_px, Some(&speeding_spans(telemetry, job.clip.start_ms, dur_s, pv.speed_limit_kmh)))
+        }
+        _ => None,
+    };
+    // The reframed, leveled view at any size and rate, from the source input to `rotate`.
+    let view = |w: u32, h: u32, fps: u32| -> Result<String> {
+        // Square canvas that still covers the output at any roll (its diagonal), with the
+        // focal length the field of view gives across the short side.
+        let canvas = (f64::from(w).hypot(f64::from(h)) / 2.0).ceil() as u32 * 2 + 4;
+        let focal = f64::from(w.min(h)) / 2.0 / (s.h_fov_deg.clamp(40.0, 130.0).to_radians() / 2.0).tan();
+        let canvas_fov = 2.0 * (f64::from(canvas) / 2.0 / focal).atan().to_degrees();
+        let mut g = String::new();
+        match probe.layout {
+            FisheyeLayout::DualStream => g.push_str("[0:v:0][0:v:1]hstack=inputs=2,"),
+            FisheyeLayout::SideBySide => g.push_str("[0:v:0]"),
+        }
+        let _ = write!(g, "setpts=PTS-STARTPTS,fps={fps}");
+        if let Some(chain) = &dash {
+            g.push_str("[dfin];");
+            g.push_str(chain);
+        }
+        let _ = write!(
+            g,
+            ",sendcmd=f={cmd},\
+             v360@cam=input=dfisheye:output=flat:ih_fov={lf}:iv_fov={lf}:h_fov={cf:.4}:v_fov={cf:.4}:\
+             w={canvas}:h={canvas}:interp=cubic:rorder=ypr:yaw={y0:.3}:pitch={p0:.3}:roll=0,\
+             rotate@roll=angle={a0:.6}:ow={w}:oh={h}:c=black",
+            cmd = quoted(&cmd_file)?,
+            lf = s.lens_fov_deg,
+            cf = canvas_fov,
+            a0 = -r0.to_radians(),
+        );
+        Ok(g)
+    };
+    let mut g = view(w, h, s.fps)?;
+
+    if let (true, Some(pass)) = (pv.plates, plate_pass) {
+        // Pass 1: the same view, smaller and at 10 fps, as raw frames for the detector.
+        let k = (f64::from(DETECT_LONG_PX) / f64::from(w.max(h))).min(1.0);
+        let even = |v: u32| ((f64::from(v) * k / 2.0).round() as u32 * 2).max(2);
+        let (dw, dh) = (even(w), even(h));
+        let total = (dur_s * f64::from(DETECT_FPS)).ceil() as usize;
+        let mut det_args: Vec<OsString> = ["-hide_banner", "-nostdin", "-loglevel", "error"].map(OsString::from).to_vec();
+        if s.hwaccel_decode {
+            det_args.extend(["-hwaccel", HWACCEL].map(OsString::from));
+        }
+        det_args.extend(insv_in.iter().cloned());
+        det_args.push("-filter_complex".into());
+        det_args.push(format!("{},format=rgb24[det]", view(dw, dh, DETECT_FPS)?).into());
+        det_args.extend(["-map", "[det]", "-frames:v", &total.to_string(), "-f", "rawvideo", "pipe:1"].map(OsString::from));
+        let dets = detect_plates(pass, det_args, dw, dh, total).await?;
+
+        // Pass 2: pixelate the whole view once, then show it only through a mask of boxes
+        // that a sendcmd script moves over the plates.
+        if let Some(script) = plates::mask_script(&dets, frames, fps, w as f32 / dw as f32, w, h) {
+            let plate_file = work_dir.join(format!("{}.plates", job.clip.id));
+            tokio::fs::write(&plate_file, script).await?;
+            g.push_str(&plate_blur(w, h, s.fps, &plate_file)?);
+        }
     }
-    let _ = write!(
-        g,
-        "setpts=PTS-STARTPTS,fps={fps},sendcmd=f={cmd},\
-         v360@cam=input=dfisheye:output=flat:ih_fov={lf}:iv_fov={lf}:h_fov={cf:.4}:v_fov={cf:.4}:\
-         w={canvas}:h={canvas}:interp=cubic:rorder=ypr:yaw={y0:.3}:pitch={p0:.3}:roll=0,\
-         rotate@roll=angle={a0:.6}:ow={w}:oh={h}:c=black",
-        fps = s.fps,
-        cmd = quoted(&cmd_file)?,
-        lf = s.lens_fov_deg,
-        cf = canvas_fov,
-        a0 = -r0.to_radians(),
-    );
     if let Some(lut) = &s.lut_path {
         let _ = write!(g, ",lut3d=file={}:interp=tetrahedral", quoted(lut)?);
     }
@@ -643,9 +839,88 @@ mod tests {
         }
     }
 
+    #[test]
+    fn speeding_spans_pad_and_merge() {
+        let frame = |i: usize, kmh: f64| TelemetryFrame {
+            timestamp_ms: i as f64 * 1000.0 / 60.0, lean_angle: 0.0, horizon_roll: 0.0, horizon_pitch: 0.0,
+            g_lon: 0.0, g_lat: 0.0, speed_kmh: kmh, lat: 0.0, lon: 0.0, audio_rms: 0.0, spectrum_bars: [0.0; 24],
+        };
+        // Fast 1..2 s and 2.6..3 s (gap under a second: merged), then 6..7 s.
+        let tel: Vec<_> = (0..600)
+            .map(|i| {
+                let t = i as f64 / 60.0;
+                frame(i, if (1.0..2.0).contains(&t) || (2.6..3.0).contains(&t) || (6.0..7.0).contains(&t) { 130.0 } else { 80.0 })
+            })
+            .collect();
+        let spans = speeding_spans(&tel, 0.0, 9.0, 110.0);
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert!((spans[0].0 - 0.5).abs() < 0.05 && (spans[0].1 - 3.5).abs() < 0.05, "{spans:?}");
+        assert!((spans[1].0 - 5.5).abs() < 0.05 && (spans[1].1 - 7.5).abs() < 0.05, "{spans:?}");
+        assert!(speeding_spans(&tel, 0.0, 9.0, 200.0).is_empty());
+    }
+
     /// End-to-end on a synthetic `.insv` stand-in (two 1440² streams + stereo audio): probe,
     /// sendcmd v360 + rotate Horizon Lock, Stereo Split ducking, two-pass loudnorm, platform
     /// hardware decode and encode (VideoToolbox on macOS, NVENC elsewhere).
+    /// Detection then pixelation on a still with a plate. Needs ffmpeg, REVLINE_PLATE_MODEL and
+    /// REVLINE_PLATE_IMAGE; writes the result to `$TMPDIR/revline-plates.png`.
+    #[tokio::test]
+    #[ignore]
+    async fn pixelates_detected_plates() {
+        let image = std::env::var("REVLINE_PLATE_IMAGE").unwrap();
+        let src = |vf: &str| -> Vec<OsString> {
+            ["-hide_banner", "-nostdin", "-loglevel", "error", "-loop", "1", "-t", "1", "-i", &image, "-filter_complex", vf].map(OsString::from).to_vec()
+        };
+        let pass = PlatePass {
+            model: std::env::var("REVLINE_PLATE_MODEL").unwrap().into(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            on_progress: Arc::new(|_, _| {}),
+        };
+        let mut args = src("[0:v]scale=640:360,setsar=1,fps=10,format=rgb24[det]");
+        args.extend(["-map", "[det]", "-frames:v", "10", "-f", "rawvideo", "pipe:1"].map(OsString::from));
+        let dets = detect_plates(&pass, args, 640, 360, 10).await.unwrap();
+        assert_eq!(dets.len(), 10);
+        let b = *dets[5].1.first().expect("a plate");
+        let script = plates::mask_script(&dets, 30, 30.0, 2.0, 1280, 720).unwrap();
+        let dir = std::env::temp_dir();
+        let plate_file = dir.join("revline-plates.cmd");
+        std::fs::write(&plate_file, script).unwrap();
+
+        let frame = |vf: String| {
+            let mut a = src(&vf);
+            a.extend(["-map", "[out]", "-frames:v", "16", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"].map(OsString::from));
+            let out = std::process::Command::new("ffmpeg").args(&a).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            out.stdout[out.stdout.len() - 1280 * 720 * 3..].to_vec()
+        };
+        let base = "[0:v]scale=1280:720,setsar=1,fps=30".to_string();
+        let plain = frame(format!("{base}[out]"));
+        let blurred = frame(format!("{base}{}[out]", plate_blur(1280, 720, 30, &plate_file).unwrap()));
+        // Mean absolute difference inside the plate and in a corner far from it.
+        let diff = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            let (mut sum, mut n) = (0u64, 0u64);
+            for y in y0 as usize..y1 as usize {
+                for x in x0 as usize..x1 as usize {
+                    for c in 0..3 {
+                        let i = (y * 1280 + x) * 3 + c;
+                        sum += u64::from(plain[i].abs_diff(blurred[i]));
+                        n += 1;
+                    }
+                }
+            }
+            sum as f64 / n as f64
+        };
+        let inside = diff(b.x0 * 2.0, b.y0 * 2.0, b.x1 * 2.0, b.y1 * 2.0);
+        let corner = if b.x0 > 320.0 { diff(0.0, 0.0, 200.0, 120.0) } else { diff(1080.0, 600.0, 1280.0, 720.0) };
+        let png = dir.join("revline-plates.png");
+        let mut a = src(&format!("{base}{}[out]", plate_blur(1280, 720, 30, &plate_file).unwrap()));
+        a.extend(["-map", "[out]", "-ss", "0.5", "-frames:v", "1", "-y"].map(OsString::from));
+        a.push(png.into_os_string());
+        assert!(std::process::Command::new("ffmpeg").args(&a).status().unwrap().success());
+        eprintln!("plate {b:?}: inside {inside:.1}, corner {corner:.1}");
+        assert!(inside > 8.0 && corner < 2.0, "inside {inside}, corner {corner}");
+    }
+
     /// `cargo test -- --ignored`, needs ffmpeg.
     #[tokio::test]
     #[ignore]
@@ -672,10 +947,15 @@ mod tests {
                 lean_angle: 40.0 * (i as f64 / 60.0).sin(),
                 horizon_roll: 40.0 * (i as f64 / 60.0).sin(),
                 horizon_pitch: 3.0 * (i as f64 / 30.0).sin(),
-                g_lon: 0.0, g_lat: 0.0, speed_kmh: 0.0, lat: 0.0, lon: 0.0,
+                g_lon: 0.0, g_lat: 0.0, speed_kmh: if (60..150).contains(&i) { 120.0 } else { 50.0 }, lat: 0.0, lon: 0.0,
                 audio_rms: 0.0, spectrum_bars: [0.0; 24],
             })
             .collect();
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pass = std::env::var("REVLINE_PLATE_MODEL").ok().map(|model| {
+            let seen = seen.clone();
+            PlatePass { model: model.into(), cancel: Arc::new(AtomicBool::new(false)), on_progress: Arc::new(move |done, _| seen.store(done, Ordering::Relaxed)) }
+        });
         for (w, h, fps) in [(1080, 1920, 60), (1280, 720, 30)] {
             let job = RenderJob {
                 source: ProjectSource {
@@ -695,9 +975,20 @@ mod tests {
                     camera_mode: CameraMode::Auto, horizon_lock: true, lut_path: None, vignette: 0.5,
                     hud: false, codec: VideoCodec::H264, quality: Quality::High, width: w, height: h, fps, hwaccel_decode: true,
                     lens_fov_deg: 200.0, h_fov_deg: 80.0, pitch_offset_deg: -8.0, sound: default_sound(),
+                privacy: PrivacySettings {
+                    speed_limit_kmh: 90.0, hide_hud_speed: true,
+                    // With REVLINE_PLATE_MODEL set, runs the detection pass (finds nothing here).
+                    plates: pass.is_some(),
+                    // Exercises the fisheye-space blur on both renders.
+                    dashboard: if fps == 60 { BlurWhen::Always } else { BlurWhen::AboveLimit },
+                    dashboard_spot: Some(LensSpot { lens: CameraAngle::Rear, u: 0.5, v: 0.8, radius: 0.08 }),
+                },
                 },
             };
-            let p = prepare(&job, &telemetry, &dir).await.unwrap();
+            let p = prepare(&job, &telemetry, &dir, pass.as_ref()).await.unwrap();
+            if pass.is_some() {
+                assert!(seen.swap(0, Ordering::Relaxed) > 0, "the detection pass ran");
+            }
             let last = Arc::new(std::sync::Mutex::new(EncodeStats::default()));
             let l2 = last.clone();
             let out = RenderProcess::spawn(p, move |s| *l2.lock().unwrap() = s).unwrap().finish().await.unwrap();

@@ -12,6 +12,8 @@ interface Props {
   getTimeMs: () => number;
   onTrim: (startMs: number, endMs: number) => void;
   onSeek: (ms: number) => void;
+  /** Absolute [start, end] ms spans drawn in red under the ruler, e.g. riding too fast. */
+  alerts?: [number, number][];
 }
 
 const PAD_MS = 4_000;
@@ -44,10 +46,10 @@ function lanesFor(hasVoice: boolean): Lane[] {
 }
 
 /** Clip ± 4 s. RPM in the heat-tint scale, pops and shifts on the exhaust lane, trim brackets. */
-export default function Timeline({ analysis, waveform, clip, cameraMode, getTimeMs, onTrim, onSeek }: Props) {
+export default function Timeline({ analysis, waveform, clip, cameraMode, getTimeMs, onTrim, onSeek, alerts = [] }: Props) {
   const ref = useRef<HTMLCanvasElement>(null);
-  const live = useRef({ analysis, waveform, clip, cameraMode, getTimeMs });
-  live.current = { analysis, waveform, clip, cameraMode, getTimeMs };
+  const live = useRef({ analysis, waveform, clip, cameraMode, getTimeMs, alerts });
+  live.current = { analysis, waveform, clip, cameraMode, getTimeMs, alerts };
   const drag = useRef<{ edge: "start" | "end"; t0: number; t1: number } | null>(null);
   const lanes = lanesFor(waveform.voice !== null);
 
@@ -66,7 +68,7 @@ export default function Timeline({ analysis, waveform, clip, cameraMode, getTime
     const sans = root.getPropertyValue("--font-barlow") || "sans-serif";
     let raf = 0;
     const draw = () => {
-      const { analysis, waveform, clip, cameraMode, getTimeMs } = live.current;
+      const { analysis, waveform, clip, cameraMode, getTimeMs, alerts } = live.current;
       const lanes = lanesFor(waveform.voice !== null);
       const dpr = window.devicePixelRatio || 1;
       const w = canvas.clientWidth;
@@ -90,6 +92,12 @@ export default function Timeline({ analysis, waveform, clip, cameraMode, getTime
         ctx.fillStyle = major ? C.muted : C.hairline;
         ctx.fillRect(px, major ? 10 : 14, 1, major ? 10 : 6);
         if (major) ctx.fillText(`${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`, px + 3, 1);
+      }
+
+      ctx.fillStyle = C.pop;
+      for (const [a, b] of alerts) {
+        if (b < t0 || a > t1) continue;
+        ctx.fillRect(x(a), RULER - 3, Math.max(2, x(b) - x(a)), 3);
       }
 
       let top = RULER + GAP;

@@ -3,7 +3,9 @@
 import type { GpuSample } from "@/lib/types";
 import { Progress } from "./ui";
 
-export type JobStatus = "QUEUED" | "PREPARING" | "ENCODING" | "DONE" | "FAILED" | "CANCELED";
+export type JobStatus = "QUEUED" | "PREPARING" | "DOWNLOADING" | "DETECTING" | "ENCODING" | "DONE" | "FAILED" | "CANCELED";
+
+export const isRunning = (s: JobStatus) => s === "PREPARING" || s === "DOWNLOADING" || s === "DETECTING" || s === "ENCODING";
 
 export interface RenderJobState {
   id: string;
@@ -36,6 +38,10 @@ function detail(j: RenderJobState, now: number): string {
       return "Waiting";
     case "PREPARING":
       return "Probing the file and measuring loudness";
+    case "DOWNLOADING":
+      return `Downloading the plate detector, first use only · ${j.frame} %`;
+    case "DETECTING":
+      return `Looking for license plates · ${j.frame} / ${j.total} frames`;
     case "ENCODING": {
       const left = j.total - j.frame;
       const eta = j.fps > 0 ? ` · ${dur((left / j.fps) * 1000)} left` : "";
@@ -59,7 +65,7 @@ interface Props {
 }
 
 export default function RenderQueue({ jobs, gpu, now, onCancel, onClear }: Props) {
-  const running = jobs.some((j) => j.status === "PREPARING" || j.status === "ENCODING" || j.status === "QUEUED");
+  const running = jobs.some((j) => isRunning(j.status) || j.status === "QUEUED");
   return (
     <section aria-label="Renders" className="border-b border-hairline bg-panel px-4 py-4">
       <div className="mb-3 flex items-baseline justify-between">
@@ -77,7 +83,7 @@ export default function RenderQueue({ jobs, gpu, now, onCancel, onClear }: Props
       )}
       <ul className="space-y-3">
         {jobs.map((j) => {
-          const active = j.status === "PREPARING" || j.status === "ENCODING";
+          const active = isRunning(j.status);
           return (
             <li key={j.id}>
               <div className="flex items-baseline justify-between gap-3">

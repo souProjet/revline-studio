@@ -126,6 +126,24 @@ export interface SoundSettings {
 
 export type Quality = "STANDARD" | "HIGH" | "MAX";
 
+export type BlurWhen = "OFF" | "ABOVE_LIMIT" | "ALWAYS";
+
+/** A fixed spot in one lens image (u, v 0..1; radius as a fraction of the lens width). */
+export interface LensSpot {
+  lens: CameraAngle;
+  u: number;
+  v: number;
+  radius: number;
+}
+
+export interface PrivacySettings {
+  speed_limit_kmh: number;
+  hide_hud_speed: boolean;
+  dashboard: BlurWhen;
+  dashboard_spot: LensSpot | null;
+  plates: boolean;
+}
+
 export interface RenderSettings {
   camera_mode: CameraMode;
   horizon_lock: boolean;
@@ -144,6 +162,7 @@ export interface RenderSettings {
   h_fov_deg: number;
   pitch_offset_deg: number;
   sound: SoundSettings;
+  privacy: PrivacySettings;
 }
 
 export interface RenderJob {
@@ -161,7 +180,7 @@ export interface RenderStarted {
 
 export interface RenderProgress {
   job_id: string;
-  stage: "PREPARING" | "ENCODING";
+  stage: "PREPARING" | "DOWNLOADING" | "DETECTING" | "ENCODING";
   total: number;
   frame: number;
   fps: number;

@@ -2,7 +2,7 @@
 name = "revline-studio"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.90"
+rust-version = "1.92"
 description = "Revline Studio: automated Pure Sound MT-09 edits from Insta360 X4 footage"
 license = "MIT"
 
@@ -21,6 +21,18 @@ serde_json = "1"
 anyhow = "1"
 rustfft = "6.4"
 telemetry-parser = "0.4.0"
+# Model download on first use, and its integrity check.
+ureq = "3"
+sha2 = "0.10"
+
+# License-plate detection. Prebuilt ONNX Runtime is downloaded at build time; CUDA (Linux) and
+# CoreML (macOS) are used when available, otherwise the CPU. The prebuilt binaries only exist
+# per platform, so the provider features are per target.
+[target.'cfg(target_os = "linux")'.dependencies]
+ort = { version = "=2.0.0-rc.15", features = ["cuda"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+ort = { version = "=2.0.0-rc.15", features = ["coreml"] }
 
 [profile.dev.package."*"]
 # DSP and telemetry fusion are unusably slow unoptimized; keep our crate debuggable.

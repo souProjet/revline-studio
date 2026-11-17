@@ -63,6 +63,8 @@ export async function renderClip(
       canvas.width = width;
       canvas.height = height;
       const layout = hudLayout(aspectOf(width, height));
+      const { privacy } = job.settings;
+      const hideAbove = privacy.hide_hud_speed ? privacy.speed_limit_kmh : null;
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("2D canvas unavailable");
       // toBlob copies the bitmap when called, so the next frame can be drawn right away.
@@ -80,7 +82,7 @@ export async function renderClip(
       };
       for (let i = 0; i < started.frame_count; i++) {
         if (canceled()) throw new RenderCanceled();
-        drawHud(ctx, track, job.clip.start_ms + (i * 1000) / fps, hud, layout);
+        drawHud(ctx, track, job.clip.start_ms + (i * 1000) / fps, hud, layout, hideAbove);
         queue.push(encode());
         if (queue.length >= PIPELINE) await sendOne();
       }

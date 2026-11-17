@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { DEFAULT_HUD, type HudOptions } from "./hud";
-import type { Quality, RenderSettings, SoundSettings, VideoCodec } from "./types";
+import type { PrivacySettings, Quality, RenderSettings, SoundSettings, VideoCodec } from "./types";
 
 export const DEFAULT_SOUND: SoundSettings = {
   exhaust_eq: true,
@@ -21,6 +21,14 @@ export const DEFAULT_SOUND: SoundSettings = {
   true_peak_db: -1,
 };
 
+export const DEFAULT_PRIVACY: PrivacySettings = {
+  speed_limit_kmh: 90,
+  hide_hud_speed: true,
+  dashboard: "OFF",
+  dashboard_spot: null,
+  plates: false,
+};
+
 export const DEFAULT_SETTINGS: RenderSettings = {
   camera_mode: "AUTO",
   horizon_lock: true,
@@ -37,6 +45,7 @@ export const DEFAULT_SETTINGS: RenderSettings = {
   h_fov_deg: 80,
   pitch_offset_deg: -8,
   sound: DEFAULT_SOUND,
+  privacy: DEFAULT_PRIVACY,
 };
 
 export { DEFAULT_HUD };

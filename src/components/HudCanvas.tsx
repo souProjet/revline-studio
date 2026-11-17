@@ -18,6 +18,7 @@ interface Props {
   getTimeMs: () => number;
   options: HudOptions;
   layout: HudLayout;
+  hideSpeedAbove: number | null;
   showSafeZones: boolean;
   /** Arrange mode: elements can be dragged inside the safe area. */
   editable: boolean;
@@ -28,11 +29,11 @@ interface Props {
  * Live 60 fps overlay. The backing store is the base-size frame (1080 px short side) scaled
  * by CSS; the exporter draws the same layout at output size, so geometry matches.
  */
-export default function HudCanvas({ track, getTimeMs, options, layout, showSafeZones, editable, onMove }: Props) {
+export default function HudCanvas({ track, getTimeMs, options, layout, hideSpeedAbove, showSafeZones, editable, onMove }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [active, setActive] = useState<HudElement | null>(null);
-  const live = useRef({ track, getTimeMs, options, layout, showSafeZones, editable, active });
-  live.current = { track, getTimeMs, options, layout, showSafeZones, editable, active };
+  const live = useRef({ track, getTimeMs, options, layout, hideSpeedAbove, showSafeZones, editable, active });
+  live.current = { track, getTimeMs, options, layout, hideSpeedAbove, showSafeZones, editable, active };
   const drag = useRef<{ el: HudElement; startX: number; startY: number; ox: number; oy: number } | null>(null);
 
   useEffect(() => {
@@ -40,8 +41,8 @@ export default function HudCanvas({ track, getTimeMs, options, layout, showSafeZ
     if (!ctx) return;
     let raf = 0;
     const tick = () => {
-      const { track, getTimeMs, options, layout, showSafeZones, editable, active } = live.current;
-      drawHud(ctx, track, getTimeMs(), options, layout);
+      const { track, getTimeMs, options, layout, hideSpeedAbove, showSafeZones, editable, active } = live.current;
+      drawHud(ctx, track, getTimeMs(), options, layout, hideSpeedAbove);
       if (showSafeZones || editable) drawSafeZones(ctx, layout);
       if (editable) drawHandles(ctx, options, layout, active);
       raf = requestAnimationFrame(tick);
