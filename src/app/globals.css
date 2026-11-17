@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+/*
+ * Neutral asphalt surround: the viewer is judged for grade, so the chrome stays achromatic.
+ * Heat ramp = Dominator GP3 titanium heat tint, used only as the RPM / Action Score scale.
+ * Straw is the single action color; pop red marks crackles (shared with the HUD redline).
+ */
+@theme {
+  --color-surround: #1a1a1b;
+  --color-panel: #222325;
+  --color-raised: #2c2d30;
+  --color-hairline: #36373b;
+  --color-fg: #ebe8e3;
+  --color-muted: #a29f99;
+  --color-faint: #6f6d69;
+  --color-straw: #e0b85c;
+  --color-straw-ink: #1f1a0e;
+  --color-bronze: #c97d3c;
+  --color-violet: #8a55b8;
+  --color-ti-blue: #4a7be0;
+  --color-pop: #ff2a54;
+
+  --font-sans: var(--font-barlow), system-ui, sans-serif;
+  --font-cond: var(--font-barlow-cond), var(--font-barlow), sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--color-surround);
+  color: var(--color-fg);
+  color-scheme: dark;
+  font-feature-settings: "tnum" 1;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-fg);
+  outline-offset: 2px;
+}
+
+input[type="range"] {
+  appearance: none;
+  height: 20px;
+  background: transparent;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px;
+  background: var(--color-hairline);
+}
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--color-fg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0ms !important;
+  }
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [class*="animate-"] {
+    animation: none !important;
+    width: 100% !important;
+    opacity: 0.5;
+  }
+}

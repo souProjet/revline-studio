@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+src-tauri/target/
+src-tauri/gen/
+
+# Local tooling and OS files
+.claude/
+.DS_Store
+.env*

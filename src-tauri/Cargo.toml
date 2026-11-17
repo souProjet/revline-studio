@@ -1,0 +1,40 @@
+[package]
+name = "revline-studio"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Revline Studio: automated Pure Sound MT-09 edits from Insta360 X4 footage"
+license = "MIT"
+
+[lib]
+name = "revline_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = ["protocol-asset"] }
+tokio = { version = "1.54", features = ["process", "io-util", "rt-multi-thread", "macros", "sync", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+rustfft = "6.4"
+telemetry-parser = "0.4.0"
+
+[profile.dev.package."*"]
+# DSP and telemetry fusion are unusably slow unoptimized; keep our crate debuggable.
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[lints.clippy]
+panic            = "deny"
+unimplemented    = "deny"
+dbg_macro        = "deny"
+todo             = "warn"
+unwrap_used      = "warn"
+expect_used      = "warn"
+unwrap_in_result = "warn"
