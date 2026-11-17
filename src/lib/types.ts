@@ -124,6 +124,8 @@ export interface SoundSettings {
   true_peak_db: number;
 }
 
+export type Quality = "STANDARD" | "HIGH" | "MAX";
+
 export interface RenderSettings {
   camera_mode: CameraMode;
   horizon_lock: boolean;
@@ -132,7 +134,11 @@ export interface RenderSettings {
   vignette: number;
   hud: boolean;
   codec: VideoCodec;
-  bitrate_mbps: number;
+  quality: Quality;
+  /** Output frame size, both even; the aspect follows from it. */
+  width: number;
+  height: number;
+  fps: number;
   hwaccel_decode: boolean;
   lens_fov_deg: number;
   h_fov_deg: number;

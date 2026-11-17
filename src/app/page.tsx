@@ -9,7 +9,7 @@ import ProxyViewport, { type ProxyViewportHandle } from "@/components/ProxyViewp
 import RenderQueue, { jobProgress, type RenderJobState } from "@/components/RenderQueue";
 import Timeline from "@/components/Timeline";
 import { Button, Progress, RadioList, Section, Status, TextField } from "@/components/ui";
-import { frameIndexAt, type TelemetryTrack } from "@/lib/hud";
+import { aspectOf, frameIndexAt, hudLayout, type TelemetryTrack } from "@/lib/hud";
 import {
   analyzeProject,
   cancelRender,
@@ -46,6 +46,7 @@ export default function Studio() {
   const [settings, setSettings] = usePersistentState("revline.render.v2", DEFAULT_SETTINGS);
   const [hud, setHud] = usePersistentState("revline.hud.v2", DEFAULT_HUD);
   const [outDir, setOutDir] = usePersistentState("revline.outdir.v1", { path: "" });
+  const layout = useMemo(() => hudLayout(aspectOf(settings.width, settings.height)), [settings.width, settings.height]);
   const [safeZones, setSafeZones] = useState(false);
   const [arranging, setArranging] = useState(false);
   const [progress, setProgress] = useState<AnalysisProgress | null>(null);
@@ -201,7 +202,12 @@ export default function Studio() {
         const frames = await getTelemetryWindow(c.start_ms - 90_000, c.end_ms + 1_000);
         const done = await renderClip(
           job.id,
-          { source, clip: c, output_path: `${(outDir.path || dirOf(source.insv_path)).replace(/\/?$/, "/")}revline_${c.id}.mp4`, settings },
+          {
+            source,
+            clip: c,
+            output_path: `${(outDir.path || dirOf(source.insv_path)).replace(/\/?$/, "/")}revline_${c.id}_${settings.width}x${settings.height}.mp4`,
+            settings,
+          },
           { frames },
           hud,
           (sent, total) => patchJob(job.id, { hudSent: sent, total }),
@@ -384,8 +390,19 @@ export default function Studio() {
       </aside>
 
       <main className="flex min-h-0 flex-col items-center justify-center gap-3 px-6 py-5">
-        <div className="relative aspect-[9/16] h-full max-h-full min-h-0 overflow-hidden rounded-[2px] bg-black">
-          <ProxyViewport ref={viewport} src={proxySrc} viewAt={viewAt} lensFovDeg={settings.lens_fov_deg} hFovDeg={settings.h_fov_deg} />
+        <div
+          className={`relative max-h-full min-h-0 max-w-full overflow-hidden rounded-[2px] bg-black ${settings.width > settings.height ? "w-full" : "h-full"}`}
+          style={{ aspectRatio: `${settings.width} / ${settings.height}` }}
+        >
+          <ProxyViewport
+            ref={viewport}
+            src={proxySrc}
+            viewAt={viewAt}
+            lensFovDeg={settings.lens_fov_deg}
+            hFovDeg={settings.h_fov_deg}
+            width={settings.width}
+            height={settings.height}
+          />
           {settings.vignette > 0 && (
             <div
               className="pointer-events-none absolute inset-0"
@@ -397,9 +414,10 @@ export default function Studio() {
               track={track}
               getTimeMs={getTimeMs}
               options={hud}
+              layout={layout}
               showSafeZones={safeZones}
               editable={arranging}
-              onMove={(el, off) => setHud((h) => ({ ...h, offset: { ...h.offset, [el]: off } }))}
+              onMove={(el, off) => setHud((h) => ({ ...h, offset: { ...h.offset, [layout.aspect]: { ...h.offset[layout.aspect], [el]: off } } }))}
             />
           )}
           {!proxySrc && !arranging && (

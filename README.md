@@ -20,7 +20,7 @@ You point it at the camera's SD card. It listens to the exhaust to find the mome
 
 **Sound.** Exhaust EQ (high-pass, body, rasp), exhaust and voice levels, voice denoise (built-in or an RNNoise model), sidechain ducking of the exhaust under speech, and two-pass loudness normalization to a chosen target and true-peak ceiling.
 
-**Rendering.** ffmpeg does the 360 reprojection (`v360`), per-frame horizon rotation, LUT, vignette, HUD overlay and audio mastering in one pass, encoding on the GPU. Renders run in a queue with live progress (frames, fps, speed, time left, file size) and GPU load. Output is written to a `.part` file and only renamed once complete, so a crash or cancel never leaves a broken video behind.
+**Rendering.** Export in 9:16, 4:5, 1:1 or 16:9, from 720p to 4K, at 30 or 60 fps, with three quality levels; the HUD lays itself out for each format. ffmpeg does the 360 reprojection (`v360`), per-frame horizon rotation, LUT, vignette, HUD overlay and audio mastering in one pass, encoding on the GPU. Renders run in a queue with live progress (frames, fps, speed, time left, file size) and GPU load. Output is written to a `.part` file and only renamed once complete, so a crash or cancel never leaves a broken video behind.
 
 ## Requirements
 
@@ -91,7 +91,7 @@ HUD frames are drawn in the webview and streamed to ffmpeg as PNG over Tauri's r
 - Tested on synthetic signals and on macOS. It has not yet been validated on long real rides or on Linux with an RTX 50 card.
 - Camera pitch changes are applied only when they exceed 1 degree, to keep the render fast; roll is applied every frame.
 - RPM tracking assumes one firing frequency per engine. The divisor is set for a crossplane triple.
-- Clips are limited to 1 to 180 seconds.
+- Clips are limited to 1 to 180 seconds. Above 1080p the 360° reprojection (ffmpeg `v360`) runs on the CPU and is several times slower.
 
 ## License
 

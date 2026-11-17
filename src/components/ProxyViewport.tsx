@@ -13,6 +13,9 @@ interface Props {
   viewAt: (tMs: number) => Mat3;
   lensFovDeg: number;
   hFovDeg: number;
+  /** Output frame size; sets the aspect of the view. */
+  width: number;
+  height: number;
 }
 
 const VERT = `#version 300 es
@@ -43,15 +46,15 @@ void main() {
   color = texture(uTex, uv);
 }`;
 
-/** Plays the `.lrv` proxy (dual fisheye, side by side) reprojected to the 9:16 render view. */
+/** Plays the `.lrv` proxy (dual fisheye, side by side) reprojected to the render view. */
 const ProxyViewport = forwardRef<ProxyViewportHandle, Props>(function ProxyViewport(
-  { src, viewAt, lensFovDeg, hFovDeg },
+  { src, viewAt, lensFovDeg, hFovDeg, width, height },
   ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const live = useRef({ viewAt, lensFovDeg, hFovDeg });
-  live.current = { viewAt, lensFovDeg, hFovDeg };
+  const live = useRef({ viewAt, lensFovDeg, hFovDeg, width, height });
+  live.current = { viewAt, lensFovDeg, hFovDeg, width, height };
   useImperativeHandle(ref, () => ({ get video() { return videoRef.current; } }), []);
 
   useEffect(() => {
@@ -92,7 +95,8 @@ const ProxyViewport = forwardRef<ProxyViewportHandle, Props>(function ProxyViewp
 
     let raf = 0;
     const tick = () => {
-      const { viewAt, lensFovDeg, hFovDeg } = live.current;
+      const { viewAt, lensFovDeg, hFovDeg, width, height } = live.current;
+      const aspect = width / height;
       if (video.readyState >= 2) {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
       }
@@ -100,7 +104,8 @@ const ProxyViewport = forwardRef<ProxyViewportHandle, Props>(function ProxyViewp
       // GLSL mat3 is column-major: transpose the row-major matrix.
       gl.uniformMatrix3fv(uM, true, m);
       const th = Math.tan((hFovDeg * Math.PI) / 360);
-      gl.uniform2f(uTan, th, (th * 1920) / 1080);
+      // Field of view spans the short side; the long side follows from the aspect.
+      gl.uniform2f(uTan, aspect >= 1 ? th * aspect : th, aspect >= 1 ? th : th / aspect);
       gl.uniform1f(uHalfFov, (lensFovDeg * Math.PI) / 360);
       gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -118,7 +123,7 @@ const ProxyViewport = forwardRef<ProxyViewportHandle, Props>(function ProxyViewp
   return (
     <>
       <video ref={videoRef} src={src ?? undefined} className="hidden" muted playsInline crossOrigin="anonymous" />
-      <canvas ref={canvasRef} width={540} height={960} className="absolute inset-0 h-full w-full" />
+      <canvas ref={canvasRef} width={Math.round(width / 2)} height={Math.round(height / 2)} className="absolute inset-0 h-full w-full" />
     </>
   );
 });

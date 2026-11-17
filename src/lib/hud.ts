@@ -1,13 +1,53 @@
-// Pure HUD renderer in 1080x1920 output space. The live overlay and the PNG exporter both
-// call drawHud with the same inputs, so the exported MP4 matches the preview pixel-for-pixel.
+// Pure HUD renderer. The live overlay and the PNG exporter both call drawHud with the same
+// inputs, so the exported MP4 matches the preview pixel-for-pixel.
+//
+// Elements are drawn in their portrait 1080x1920 design coordinates, then moved to a home
+// position computed for the chosen aspect and scaled to the frame. Layout works at "base"
+// size (1080 px on the short side); drawHud scales the whole canvas to the output size.
 
 import { SPECTRUM_BARS, TELEMETRY_HZ, type TelemetryFrame } from "./types";
 
-export const HUD_W = 1080;
-export const HUD_H = 1920;
+export type Aspect = "9:16" | "4:5" | "1:1" | "16:9";
+export const ASPECTS: Aspect[] = ["9:16", "4:5", "1:1", "16:9"];
 
-/** TikTok/Reels UI: top tabs, right action rail, bottom caption + nav. Nothing drawn inside. */
-export const SAFE = { top: 160, right: 140, bottom: 480, left: 60 } as const;
+/** Frame size at 1080 px on the short side. */
+const BASE: Record<Aspect, { w: number; h: number }> = {
+  "9:16": { w: 1080, h: 1920 },
+  "4:5": { w: 1080, h: 1350 },
+  "1:1": { w: 1080, h: 1080 },
+  "16:9": { w: 1920, h: 1080 },
+};
+
+export interface Insets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+/**
+ * Margins kept free of HUD, at base size. 9:16 avoids the TikTok/Reels UI (top tabs, right
+ * action rail, caption and nav); the others use plain title-safe margins.
+ */
+const SAFE: Record<Aspect, Insets> = {
+  "9:16": { top: 160, right: 140, bottom: 480, left: 60 },
+  "4:5": { top: 60, right: 60, bottom: 60, left: 60 },
+  "1:1": { top: 60, right: 60, bottom: 60, left: 60 },
+  "16:9": { top: 60, right: 96, bottom: 60, left: 96 },
+};
+
+export function aspectOf(width: number, height: number): Aspect {
+  const r = width / height;
+  return ASPECTS.reduce((a, b) => (Math.abs(BASE[b].w / BASE[b].h - r) < Math.abs(BASE[a].w / BASE[a].h - r) ? b : a));
+}
+
+/** Output size for an aspect with `short` px on the short side, both sides even. */
+export function outputSize(aspect: Aspect, short: number) {
+  const b = BASE[aspect];
+  const k = short / 1080;
+  const even = (v: number) => Math.round((v * k) / 2) * 2;
+  return { width: even(b.w), height: even(b.h) };
+}
 
 export type HudElement = "horizon" | "gMeter" | "miniMap" | "speed" | "spectrum";
 export const HUD_ELEMENTS: HudElement[] = ["horizon", "gMeter", "miniMap", "speed", "spectrum"];
@@ -15,8 +55,8 @@ export const HUD_ELEMENTS: HudElement[] = ["horizon", "gMeter", "miniMap", "spee
 export interface HudOptions {
   fontFamily: string;
   show: Record<HudElement, boolean>;
-  /** Drag offsets in output pixels, set by arranging the HUD on the viewer. */
-  offset: Record<HudElement, { x: number; y: number }>;
+  /** Drag offsets per aspect in base pixels, set by arranging the HUD on the viewer. */
+  offset: Record<Aspect, Record<HudElement, { x: number; y: number }>>;
   /** Per-element size, 0.7..1.4. */
   scale: Record<HudElement, number>;
   color: string;
@@ -37,13 +77,9 @@ export interface HudOptions {
 export const DEFAULT_HUD: HudOptions = {
   fontFamily: "monospace",
   show: { horizon: true, gMeter: true, miniMap: true, speed: true, spectrum: true },
-  offset: {
-    horizon: { x: 0, y: 0 },
-    gMeter: { x: 0, y: 0 },
-    miniMap: { x: 0, y: 0 },
-    speed: { x: 0, y: 0 },
-    spectrum: { x: 0, y: 0 },
-  },
+  offset: Object.fromEntries(
+    ASPECTS.map((a) => [a, Object.fromEntries(HUD_ELEMENTS.map((el) => [el, { x: 0, y: 0 }]))]),
+  ) as HudOptions["offset"],
   scale: { horizon: 1, gMeter: 1, miniMap: 1, speed: 1, spectrum: 1 },
   color: "#FFFFFF",
   accent: "#00F0FF",
@@ -77,19 +113,21 @@ export function withAlpha(hex: string, a: number): string {
 
 // ---- layout ---------------------------------------------------------------------------
 
-const COL_CX = (SAFE.left + (HUD_W - SAFE.right)) / 2;
-const HZ_CY = SAFE.top + 140;
+// Portrait design coordinates every element is drawn in.
+const REF_SAFE = SAFE["9:16"];
+const COL_CX = (REF_SAFE.left + (1080 - REF_SAFE.right)) / 2;
+const HZ_CY = REF_SAFE.top + 140;
 // Stack above the caption zone: G-meter + map, speed, spectrum.
-const MID_Y = HUD_H - SAFE.bottom - 440;
-const G_CX = SAFE.left + 120;
+const MID_Y = 1920 - REF_SAFE.bottom - 440;
+const G_CX = REF_SAFE.left + 120;
 const G_R = 110;
 const MAP_X = G_CX + G_R + 40;
 const MAP_SIZE = 220;
-const SPEED_X = SAFE.left;
+const SPEED_X = REF_SAFE.left;
 const SPEED_Y = MID_Y + G_R + 150;
 const SPEC_W = 600;
 const SPEC_H = 90;
-const SPEC_BASE = HUD_H - SAFE.bottom - 20;
+const SPEC_BASE = 1920 - REF_SAFE.bottom - 20;
 
 export interface Box {
   x: number;
@@ -98,36 +136,73 @@ export interface Box {
   h: number;
 }
 
-/** Unscaled, unmoved footprint of each element. */
-const BASE_BOX: Record<HudElement, Box> = {
-  horizon: { x: COL_CX - 270, y: SAFE.top, w: 540, h: 290 },
+/** Footprint of each element in design coordinates. */
+const REF_BOX: Record<HudElement, Box> = {
+  horizon: { x: COL_CX - 270, y: REF_SAFE.top, w: 540, h: 290 },
   gMeter: { x: G_CX - G_R - 10, y: MID_Y - G_R - 10, w: 2 * G_R + 20, h: 2 * G_R + 70 },
   miniMap: { x: MAP_X, y: MID_Y + 10 - MAP_SIZE / 2, w: MAP_SIZE, h: MAP_SIZE },
   speed: { x: SPEED_X, y: SPEED_Y - 72, w: 420, h: 144 },
   spectrum: { x: COL_CX - SPEC_W / 2, y: SPEC_BASE - SPEC_H, w: SPEC_W, h: SPEC_H },
 };
 
-/** Where an element is drawn after scale (about its center) and drag offset. */
-export function elementBox(o: HudOptions, el: HudElement): Box {
-  const b = BASE_BOX[el];
-  const s = o.scale[el];
-  const off = o.offset[el];
-  const w = b.w * s;
-  const h = b.h * s;
-  return { x: b.x + (b.w - w) / 2 + off.x, y: b.y + (b.h - h) / 2 + off.y, w, h };
+export interface HudLayout {
+  aspect: Aspect;
+  /** Base frame size. */
+  w: number;
+  h: number;
+  safe: Insets;
+  /** Element size relative to the portrait design, so smaller frames get a smaller HUD. */
+  k: number;
+  /** Top-left of each element's unscaled, unmoved box. */
+  home: Record<HudElement, { x: number; y: number }>;
 }
 
-/** Clamps a drag so the element stays inside the TikTok safe area. */
-export function clampOffset(o: HudOptions, el: HudElement, x: number, y: number) {
-  const b = BASE_BOX[el];
-  const s = o.scale[el];
-  const w = b.w * s;
-  const h = b.h * s;
-  const left = b.x + (b.w - w) / 2;
-  const top = b.y + (b.h - h) / 2;
+/**
+ * Horizon at the top center; G-meter, map and speed stacked bottom-left; spectrum along the
+ * bottom (centered when the frame is wide or tall enough, else bottom-right). Reproduces the
+ * portrait design exactly at 9:16.
+ */
+export function hudLayout(aspect: Aspect): HudLayout {
+  const { w, h } = BASE[aspect];
+  const safe = SAFE[aspect];
+  const k = Math.sqrt((w * h) / (1080 * 1920));
+  const L = safe.left;
+  const R = w - safe.right;
+  const B = h - safe.bottom;
+  const centered = aspect === "9:16" || aspect === "16:9";
   return {
-    x: Math.round(Math.max(SAFE.left - left, Math.min(HUD_W - SAFE.right - w - left, x))),
-    y: Math.round(Math.max(SAFE.top - top, Math.min(HUD_H - SAFE.bottom - h - top, y))),
+    aspect,
+    w,
+    h,
+    safe,
+    k,
+    home: {
+      horizon: { x: (L + R) / 2 - (REF_BOX.horizon.w * k) / 2, y: safe.top },
+      gMeter: { x: L, y: B - 560 * k },
+      miniMap: { x: L + 270 * k, y: B - 540 * k },
+      speed: { x: L, y: B - 252 * k },
+      spectrum: { x: centered ? (L + R) / 2 - (SPEC_W * k) / 2 : R - SPEC_W * k, y: B - 110 * k },
+    },
+  };
+}
+
+/** Where an element is drawn after scale (about its center) and drag offset, in base pixels. */
+export function elementBox(o: HudOptions, el: HudElement, l: HudLayout): Box {
+  const r = REF_BOX[el];
+  const home = l.home[el];
+  const s = o.scale[el];
+  const off = o.offset[l.aspect][el];
+  const w = r.w * l.k * s;
+  const h = r.h * l.k * s;
+  return { x: home.x + (r.w * l.k - w) / 2 + off.x, y: home.y + (r.h * l.k - h) / 2 + off.y, w, h };
+}
+
+/** Clamps a drag so the element stays inside the safe area. */
+export function clampOffset(o: HudOptions, el: HudElement, l: HudLayout, x: number, y: number) {
+  const b = elementBox({ ...o, offset: { ...o.offset, [l.aspect]: { ...o.offset[l.aspect], [el]: { x: 0, y: 0 } } } }, el, l);
+  return {
+    x: Math.round(Math.max(l.safe.left - b.x, Math.min(l.w - l.safe.right - b.w - b.x, x))),
+    y: Math.round(Math.max(l.safe.top - b.y, Math.min(l.h - l.safe.bottom - b.h - b.y, y))),
   };
 }
 
@@ -140,8 +215,11 @@ interface Ink {
   alert: string;
 }
 
-export function drawHud(ctx: CanvasRenderingContext2D, track: TelemetryTrack, tMs: number, o: HudOptions): void {
-  ctx.clearRect(0, 0, HUD_W, HUD_H);
+/** Draws onto a canvas of any size with the layout's aspect; it is scaled to fill it. */
+export function drawHud(ctx: CanvasRenderingContext2D, track: TelemetryTrack, tMs: number, o: HudOptions, l: HudLayout): void {
+  const px = ctx.canvas.width / l.w;
+  ctx.setTransform(px, 0, 0, px, 0, 0);
+  ctx.clearRect(0, 0, l.w, l.h);
   const i = frameIndexAt(track, tMs);
   const f = track.frames[i];
   if (!f) return;
@@ -153,14 +231,13 @@ export function drawHud(ctx: CanvasRenderingContext2D, track: TelemetryTrack, tM
   };
   const place = (el: HudElement, draw: () => void) => {
     if (!o.show[el]) return;
-    const b = BASE_BOX[el];
-    const s = o.scale[el];
-    const cx = b.x + b.w / 2;
-    const cy = b.y + b.h / 2;
+    const r = REF_BOX[el];
+    const b = elementBox(o, el, l);
+    const s = o.scale[el] * l.k;
     ctx.save();
-    ctx.translate(cx + o.offset[el].x, cy + o.offset[el].y);
+    ctx.translate(b.x + b.w / 2, b.y + b.h / 2);
     ctx.scale(s, s);
-    ctx.translate(-cx, -cy);
+    ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
     ctx.textBaseline = "middle";
     draw();
     ctx.restore();

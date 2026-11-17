@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { DEFAULT_HUD, type HudOptions } from "./hud";
-import type { RenderSettings, SoundSettings } from "./types";
+import type { Quality, RenderSettings, SoundSettings, VideoCodec } from "./types";
 
 export const DEFAULT_SOUND: SoundSettings = {
   exhaust_eq: true,
@@ -28,7 +28,10 @@ export const DEFAULT_SETTINGS: RenderSettings = {
   vignette: 0.5,
   hud: true,
   codec: "H264",
-  bitrate_mbps: 25,
+  quality: "HIGH",
+  width: 1080,
+  height: 1920,
+  fps: 60,
   hwaccel_decode: true,
   lens_fov_deg: 200,
   h_fov_deg: 80,
@@ -37,6 +40,12 @@ export const DEFAULT_SETTINGS: RenderSettings = {
 };
 
 export { DEFAULT_HUD };
+
+/** Same formula as `render_pipeline::bitrate_mbps`, for the estimate shown before rendering. */
+export function bitrateMbps(s: { width: number; height: number; fps: number; quality: Quality; codec: VideoCodec }) {
+  const bpp = { STANDARD: 0.1, HIGH: 0.16, MAX: 0.25 }[s.quality] * (s.codec === "H264" ? 1 : 0.7);
+  return Math.min(150, Math.max(4, Math.round((s.width * s.height * s.fps * bpp) / 1e6)));
+}
 export type { HudOptions };
 
 /**

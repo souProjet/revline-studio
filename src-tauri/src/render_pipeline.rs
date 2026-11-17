@@ -1,4 +1,4 @@
-//! FFmpeg render: dual-fisheye `.insv` -> v360 rectilinear 1080x1920@60 with Horizon Lock and
+//! FFmpeg render: dual-fisheye `.insv` -> v360 rectilinear view (any size and rate) with Horizon Lock and
 //! Front/Rear switching, Moody Asphalt LUT + vignette, HUD overlay piped as PNG frames from
 //! the React exporter, Dominator GP3 mastering with voice ducking, two-pass loudnorm, and
 //! hardware encoding (NVENC on Linux, VideoToolbox on macOS).
@@ -32,11 +32,6 @@ use crate::{
     types::{AudioMode, CameraAngle, ProjectSource, SmartClip, TelemetryFrame, TELEMETRY_HZ},
 };
 
-pub const OUT_W: u32 = 1080;
-pub const OUT_H: u32 = 1920;
-pub const OUT_FPS: f64 = 60.0;
-/// Square v360 canvas that still covers the 1080x1920 crop at any roll (diagonal 2203 px).
-const ROT_CANVAS: u32 = 2208;
 
 #[cfg(target_os = "macos")]
 pub const HWACCEL: &str = "videotoolbox";
@@ -99,6 +94,26 @@ pub struct SoundSettings {
     pub true_peak_db: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Quality {
+    Standard,
+    High,
+    Max,
+}
+
+/// Target bitrate from pixel rate: bits per pixel per frame, lower for HEVC and AV1, which
+/// reach the same quality with about 30 % fewer bits. Mirrored in `src/lib/settings.ts`.
+pub fn bitrate_mbps(width: u32, height: u32, fps: u32, quality: Quality, codec: VideoCodec) -> u32 {
+    let bpp = match quality {
+        Quality::Standard => 0.10,
+        Quality::High => 0.16,
+        Quality::Max => 0.25,
+    } * if codec == VideoCodec::H264 { 1.0 } else { 0.7 };
+    let mbps = f64::from(width) * f64::from(height) * f64::from(fps) * bpp / 1e6;
+    (mbps.round() as u32).clamp(4, 150)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderSettings {
     pub camera_mode: CameraMode,
@@ -109,11 +124,15 @@ pub struct RenderSettings {
     pub vignette: f64,
     pub hud: bool,
     pub codec: VideoCodec,
-    pub bitrate_mbps: u32,
+    pub quality: Quality,
+    /// Output frame size, both even; the aspect (9:16, 4:5, 1:1, 16:9) follows from it.
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
     pub hwaccel_decode: bool,
     /// Per-lens field of view of the X4 fisheyes; tune if seams misalign.
     pub lens_fov_deg: f64,
-    /// Horizontal FOV of the 9:16 view; vertical follows from the aspect.
+    /// Field of view across the short side of the frame, so every aspect keeps the same zoom.
     pub h_fov_deg: f64,
     /// Constant view tilt, negative = look down at the road.
     pub pitch_offset_deg: f64,
@@ -219,13 +238,13 @@ fn wrap_deg(d: f64) -> f64 {
 
 /// sendcmd script: yaw cuts and >= 1° pitch moves to v360, roll to `rotate` every frame it
 /// moves by >= 0.05°.
-fn camera_script(job: &RenderJob, telemetry: &[TelemetryFrame], frames: usize) -> ((f64, f64, f64), String) {
+fn camera_script(job: &RenderJob, telemetry: &[TelemetryFrame], frames: usize, fps: f64) -> ((f64, f64, f64), String) {
     let start = job.clip.start_ms;
     let first = view_ypr(job, telemetry, start);
     let (mut yaw, mut pitch, mut roll) = first;
     let mut script = String::new();
     for i in 1..frames {
-        let t_rel = i as f64 / OUT_FPS;
+        let t_rel = i as f64 / fps;
         let (y, p, r) = view_ypr(job, telemetry, start + t_rel * 1000.0);
         let mut cmds = Vec::with_capacity(3);
         if wrap_deg(y - yaw).abs() >= 1.0 {
@@ -355,7 +374,7 @@ fn tail(log: &str, n: usize) -> String {
 
 fn encoder_args(codec: VideoCodec, bitrate_mbps: u32) -> Result<Vec<String>> {
     let enc = codec.encoder().context("this codec has no hardware encoder on this platform")?;
-    let b = bitrate_mbps.clamp(4, 120);
+    let b = bitrate_mbps.clamp(4, 150);
     let mut a: Vec<String> = vec!["-c:v".into(), enc.into()];
     #[cfg(not(target_os = "macos"))]
     a.extend(
@@ -396,12 +415,20 @@ pub async fn prepare(job: &RenderJob, telemetry: &[TelemetryFrame], work_dir: &P
             bail!("the output folder {} does not exist", dir.display());
         }
     }
-    let frames = (dur_s * OUT_FPS).round() as usize;
-    let encoder = encoder_args(s.codec, s.bitrate_mbps)?;
+    let (w, h) = (s.width, s.height);
+    if !(320..=3840).contains(&w) || !(320..=3840).contains(&h) || w % 2 != 0 || h % 2 != 0 {
+        bail!("output size {w}x{h} must be even and 320 to 3840 px on each side");
+    }
+    if !(24..=60).contains(&s.fps) {
+        bail!("frame rate {} must be 24 to 60 fps", s.fps);
+    }
+    let fps = f64::from(s.fps);
+    let frames = (dur_s * fps).round() as usize;
+    let encoder = encoder_args(s.codec, bitrate_mbps(w, h, s.fps, s.quality, s.codec))?;
     let probe = ffprobe(&src.insv_path).await?;
 
     tokio::fs::create_dir_all(work_dir).await?;
-    let ((y0, p0, r0), script) = camera_script(job, telemetry, frames);
+    let ((y0, p0, r0), script) = camera_script(job, telemetry, frames, fps);
     let cmd_file = work_dir.join(format!("{}.cmd", job.clip.id));
     tokio::fs::write(&cmd_file, script).await?;
 
@@ -439,7 +466,8 @@ pub async fn prepare(job: &RenderJob, telemetry: &[TelemetryFrame], work_dir: &P
     }
     args.extend(insv_in);
     let hud_idx = if s.hud {
-        args.extend(["-thread_queue_size", "1024", "-f", "image2pipe", "-framerate", "60", "-c:v", "png", "-i", "pipe:0"].map(OsString::from));
+        args.extend(["-thread_queue_size", "1024", "-f", "image2pipe", "-framerate"].map(OsString::from));
+        args.extend([s.fps.to_string().into(), OsString::from("-c:v"), "png".into(), "-i".into(), "pipe:0".into()]);
         Some(1)
     } else {
         None
@@ -449,9 +477,11 @@ pub async fn prepare(job: &RenderJob, telemetry: &[TelemetryFrame], work_dir: &P
         args.extend(voice_in);
     }
 
-    // Square canvas FOV with the same focal length as the 1080-wide view.
-    let focal = f64::from(OUT_W) / 2.0 / (s.h_fov_deg.clamp(40.0, 130.0).to_radians() / 2.0).tan();
-    let canvas_fov = 2.0 * (f64::from(ROT_CANVAS) / 2.0 / focal).atan().to_degrees();
+    // Square canvas that still covers the output at any roll (its diagonal), with the focal
+    // length the field of view gives across the short side.
+    let canvas = (f64::from(w).hypot(f64::from(h)) / 2.0).ceil() as u32 * 2 + 4;
+    let focal = f64::from(w.min(h)) / 2.0 / (s.h_fov_deg.clamp(40.0, 130.0).to_radians() / 2.0).tan();
+    let canvas_fov = 2.0 * (f64::from(canvas) / 2.0 / focal).atan().to_degrees();
     let mut g = String::new();
     match probe.layout {
         FisheyeLayout::DualStream => g.push_str("[0:v:0][0:v:1]hstack=inputs=2,"),
@@ -459,10 +489,11 @@ pub async fn prepare(job: &RenderJob, telemetry: &[TelemetryFrame], work_dir: &P
     }
     let _ = write!(
         g,
-        "setpts=PTS-STARTPTS,fps=60,sendcmd=f={cmd},\
+        "setpts=PTS-STARTPTS,fps={fps},sendcmd=f={cmd},\
          v360@cam=input=dfisheye:output=flat:ih_fov={lf}:iv_fov={lf}:h_fov={cf:.4}:v_fov={cf:.4}:\
-         w={ROT_CANVAS}:h={ROT_CANVAS}:interp=cubic:rorder=ypr:yaw={y0:.3}:pitch={p0:.3}:roll=0,\
-         rotate@roll=angle={a0:.6}:ow={OUT_W}:oh={OUT_H}:c=black",
+         w={canvas}:h={canvas}:interp=cubic:rorder=ypr:yaw={y0:.3}:pitch={p0:.3}:roll=0,\
+         rotate@roll=angle={a0:.6}:ow={w}:oh={h}:c=black",
+        fps = s.fps,
         cmd = quoted(&cmd_file)?,
         lf = s.lens_fov_deg,
         cf = canvas_fov,
@@ -489,7 +520,7 @@ pub async fn prepare(job: &RenderJob, telemetry: &[TelemetryFrame], work_dir: &P
     args.extend(encoder.into_iter().map(OsString::from));
     args.extend(
         [
-            "-r", "60",
+            "-r", &s.fps.to_string(),
             "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
             "-c:a", "aac", "-b:a", "320k", "-ar", "48000",
             "-frames:v", &frames.to_string(),
@@ -645,37 +676,40 @@ mod tests {
                 audio_rms: 0.0, spectrum_bars: [0.0; 24],
             })
             .collect();
-        let job = RenderJob {
-            source: ProjectSource {
-                insv_path: src.clone(), lrv_path: None, external_audio_path: None,
-                audio_mode: AudioMode::StereoSplit, sync_offset_ms: 0.0, drift_ppm: 0.0,
-            },
-            clip: SmartClip {
-                id: "t".into(), start_ms: 500.0, end_ms: 3_500.0, score: 50.0, label: "T".into(),
-                tags: vec![ClipTag::Voice],
-                camera_keyframes: vec![
-                    CameraKeyframe { timestamp_ms: 500.0, angle: CameraAngle::Front },
-                    CameraKeyframe { timestamp_ms: 2_000.0, angle: CameraAngle::Rear },
-                ],
-            },
-            output_path: dir.join("out.mp4"),
-            settings: RenderSettings {
-                camera_mode: CameraMode::Auto, horizon_lock: true, lut_path: None, vignette: 0.5,
-                hud: false, codec: VideoCodec::H264, bitrate_mbps: 25, hwaccel_decode: true,
-                lens_fov_deg: 200.0, h_fov_deg: 80.0, pitch_offset_deg: -8.0, sound: default_sound(),
-            },
-        };
-        let p = prepare(&job, &telemetry, &dir).await.unwrap();
-        let last = Arc::new(std::sync::Mutex::new(EncodeStats::default()));
-        let l2 = last.clone();
-        let out = RenderProcess::spawn(p, move |s| *l2.lock().unwrap() = s).unwrap().finish().await.unwrap();
-        assert!(!PathBuf::from(format!("{}.part", out.display())).exists());
-        assert_eq!(last.lock().unwrap().frame, 180);
-        let probe = std::process::Command::new("ffprobe")
-            .args(["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=width,height,nb_read_frames", "-of", "csv=p=0"])
-            .arg(&out)
-            .output()
-            .unwrap();
-        assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "1080,1920,180");
+        for (w, h, fps) in [(1080, 1920, 60), (1280, 720, 30)] {
+            let job = RenderJob {
+                source: ProjectSource {
+                    insv_path: src.clone(), lrv_path: None, external_audio_path: None,
+                    audio_mode: AudioMode::StereoSplit, sync_offset_ms: 0.0, drift_ppm: 0.0,
+                },
+                clip: SmartClip {
+                    id: "t".into(), start_ms: 500.0, end_ms: 3_500.0, score: 50.0, label: "T".into(),
+                    tags: vec![ClipTag::Voice],
+                    camera_keyframes: vec![
+                        CameraKeyframe { timestamp_ms: 500.0, angle: CameraAngle::Front },
+                        CameraKeyframe { timestamp_ms: 2_000.0, angle: CameraAngle::Rear },
+                    ],
+                },
+                output_path: dir.join(format!("out-{w}x{h}.mp4")),
+                settings: RenderSettings {
+                    camera_mode: CameraMode::Auto, horizon_lock: true, lut_path: None, vignette: 0.5,
+                    hud: false, codec: VideoCodec::H264, quality: Quality::High, width: w, height: h, fps, hwaccel_decode: true,
+                    lens_fov_deg: 200.0, h_fov_deg: 80.0, pitch_offset_deg: -8.0, sound: default_sound(),
+                },
+            };
+            let p = prepare(&job, &telemetry, &dir).await.unwrap();
+            let last = Arc::new(std::sync::Mutex::new(EncodeStats::default()));
+            let l2 = last.clone();
+            let out = RenderProcess::spawn(p, move |s| *l2.lock().unwrap() = s).unwrap().finish().await.unwrap();
+            assert!(!PathBuf::from(format!("{}.part", out.display())).exists());
+            let frames = 3 * fps;
+            assert_eq!(last.lock().unwrap().frame, frames as usize);
+            let probe = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=width,height,nb_read_frames", "-of", "csv=p=0"])
+                .arg(&out)
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), format!("{w},{h},{frames}"));
+        }
     }
 }

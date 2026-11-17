@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { drawHud, HUD_H, HUD_W, type HudOptions, type TelemetryTrack } from "./hud";
+import { aspectOf, drawHud, hudLayout, type HudOptions, type TelemetryTrack } from "./hud";
 import type {
   AnalysisProgress,
   GpuSample,
@@ -59,8 +59,10 @@ export async function renderClip(
   try {
     if (started.needs_hud_frames) {
       const canvas = document.createElement("canvas");
-      canvas.width = HUD_W;
-      canvas.height = HUD_H;
+      const { width, height, fps } = job.settings;
+      canvas.width = width;
+      canvas.height = height;
+      const layout = hudLayout(aspectOf(width, height));
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("2D canvas unavailable");
       // toBlob copies the bitmap when called, so the next frame can be drawn right away.
@@ -78,7 +80,7 @@ export async function renderClip(
       };
       for (let i = 0; i < started.frame_count; i++) {
         if (canceled()) throw new RenderCanceled();
-        drawHud(ctx, track, job.clip.start_ms + (i * 1000) / 60, hud);
+        drawHud(ctx, track, job.clip.start_ms + (i * 1000) / fps, hud, layout);
         queue.push(encode());
         if (queue.length >= PIPELINE) await sendOne();
       }

@@ -1,8 +1,8 @@
 "use client";
 
-import { DEFAULT_HUD, HUD_ELEMENTS, type HudElement, type HudOptions } from "@/lib/hud";
-import { DEFAULT_SETTINGS, DEFAULT_SOUND } from "@/lib/settings";
-import type { RenderSettings, SoundSettings, SystemInfo, VideoCodec } from "@/lib/types";
+import { aspectOf, DEFAULT_HUD, HUD_ELEMENTS, outputSize, type Aspect, type HudElement, type HudOptions } from "@/lib/hud";
+import { bitrateMbps, DEFAULT_SETTINGS, DEFAULT_SOUND } from "@/lib/settings";
+import type { Quality, RenderSettings, SoundSettings, SystemInfo, VideoCodec } from "@/lib/types";
 import { Button, ColorField, Section, Segmented, Slider, Switch, TextField } from "./ui";
 
 const ELEMENT_NAME: Record<HudElement, string> = {
@@ -14,6 +14,20 @@ const ELEMENT_NAME: Record<HudElement, string> = {
 };
 
 const CODEC_NAME: Record<VideoCodec, string> = { H264: "H.264", HEVC: "HEVC", AV1: "AV1" };
+
+const FORMAT_USE: Record<Aspect, string> = {
+  "9:16": "Portrait for TikTok, Reels and Shorts",
+  "4:5": "Instagram feed",
+  "1:1": "Square for feeds",
+  "16:9": "Landscape for YouTube",
+};
+
+const RESOLUTIONS: [string, string][] = [
+  ["720", "720p"],
+  ["1080", "1080p"],
+  ["1440", "1440p"],
+  ["2160", "4K"],
+];
 
 interface Props {
   settings: RenderSettings;
@@ -72,7 +86,7 @@ export default function Inspector(p: Props) {
         <Switch label="Show HUD" on={s.hud} set={set("hud")} />
         {s.hud && (
           <>
-            <Switch label="Arrange on the video" hint="Drag elements; they stay out of TikTok's buttons and caption" on={p.arranging} set={p.setArranging} />
+            <Switch label="Arrange on the video" hint="Drag elements; they stay inside the format's safe area" on={p.arranging} set={p.setArranging} />
             <div className="space-y-2 rounded-[3px] bg-surround p-3">
               {HUD_ELEMENTS.map((el) => (
                 <div key={el} className="space-y-1.5">
@@ -124,7 +138,7 @@ export default function Inspector(p: Props) {
                 />
               </>
             )}
-            <Switch label="Show TikTok safe zones" hint="Preview only, never rendered" on={p.safeZones} set={p.setSafeZones} />
+            <Switch label="Show safe zones" hint="Preview only, never rendered" on={p.safeZones} set={p.setSafeZones} />
           </>
         )}
       </Section>
@@ -176,6 +190,7 @@ export default function Inspector(p: Props) {
 
       <Section title="Export" collapsible>
         <TextField label="Save to" value={p.outDir} placeholder="Next to the recording" onChange={p.setOutDir} />
+        <OutputFormat settings={s} setSettings={p.setSettings} />
         <Segmented
           label="Codec"
           value={s.codec}
@@ -183,13 +198,60 @@ export default function Inspector(p: Props) {
           disabled={failed}
           onChange={set("codec")}
         />
-        <Slider label="Bitrate" unit=" Mb/s" min={10} max={60} value={s.bitrate_mbps} set={set("bitrate_mbps")} />
         <Switch label="Decode on the GPU" hint="Frees the CPU for reprojection" on={s.hwaccel_decode} set={set("hwaccel_decode")} />
         <Hardware system={p.system} />
         <Button variant="ghost" className="-ml-3.5" onClick={() => p.setSettings(() => DEFAULT_SETTINGS)}>
           Reset all render settings
         </Button>
       </Section>
+    </>
+  );
+}
+
+function OutputFormat({ settings: s, setSettings }: Pick<Props, "settings" | "setSettings">) {
+  const aspect = aspectOf(s.width, s.height);
+  const short = Math.min(s.width, s.height);
+  const size = (a: Aspect, px: number) => setSettings((x) => ({ ...x, ...outputSize(a, px) }));
+  const mbps = bitrateMbps(s);
+  return (
+    <>
+      <div className="space-y-1.5">
+        <Segmented
+          label="Format"
+          value={aspect}
+          options={(["9:16", "4:5", "1:1", "16:9"] as Aspect[]).map((a) => [a, a])}
+          onChange={(a) => size(a, short)}
+        />
+        <p className="text-[12px] text-muted">{FORMAT_USE[aspect]}</p>
+      </div>
+      <Segmented label="Resolution" value={String(short)} options={RESOLUTIONS} onChange={(v) => size(aspect, Number(v))} />
+      <Segmented
+        label="Frame rate"
+        value={String(s.fps)}
+        options={[
+          ["30", "30 fps"],
+          ["60", "60 fps"],
+        ]}
+        onChange={(v) => setSettings((x) => ({ ...x, fps: Number(v) }))}
+      />
+      <Segmented
+        label="Quality"
+        value={s.quality}
+        options={[
+          ["STANDARD", "Standard"],
+          ["HIGH", "High"],
+          ["MAX", "Maximum"],
+        ] as [Quality, string][]}
+        onChange={(v) => setSettings((x) => ({ ...x, quality: v }))}
+      />
+      <p className="font-mono text-[12px] text-muted">
+        {s.width} × {s.height} · {s.fps} fps · {mbps} Mb/s · about {Math.round((mbps * 60) / 8 + 2.4)} MB per minute
+      </p>
+      {short > 1080 && (
+        <p className="text-[12px] text-muted">
+          Above 1080p the 360° reprojection runs on the CPU and renders several times slower. TikTok and Instagram re-encode to 1080p.
+        </p>
+      )}
     </>
   );
 }
