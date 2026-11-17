@@ -224,6 +224,7 @@ export function drawHud(
   o: HudOptions,
   l: HudLayout,
   hideSpeedAbove: number | null,
+  leanOffsetDeg = 0,
 ): void {
   const px = ctx.canvas.width / l.w;
   ctx.setTransform(px, 0, 0, px, 0, 0);
@@ -250,7 +251,7 @@ export function drawHud(
     draw();
     ctx.restore();
   };
-  place("horizon", () => drawHorizon(ctx, f, o, ink));
+  place("horizon", () => drawHorizon(ctx, f, o, ink, leanOffsetDeg));
   place("gMeter", () => drawGMeter(ctx, track, i, o, ink));
   place("miniMap", () => drawMiniMap(ctx, track, i, o, ink));
   place("speed", () => drawSpeed(ctx, f, o, ink, hideSpeedAbove));
@@ -261,10 +262,10 @@ function font(o: HudOptions, px: number, weight = 600) {
   return `${weight} ${px}px ${o.fontFamily}`;
 }
 
-function drawHorizon(ctx: CanvasRenderingContext2D, f: TelemetryFrame, o: HudOptions, ink: Ink) {
+function drawHorizon(ctx: CanvasRenderingContext2D, f: TelemetryFrame, o: HudOptions, ink: Ink, leanOffsetDeg: number) {
   const cx = COL_CX;
   const cy = HZ_CY;
-  const lean = f.lean_angle;
+  const lean = f.lean_angle + leanOffsetDeg;
   const abs = Math.abs(lean);
   const tone = abs >= o.leanAlertDeg ? ink.alert : abs >= o.leanAccentDeg ? ink.accent : ink.main;
 

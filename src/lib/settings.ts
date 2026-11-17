@@ -32,6 +32,7 @@ export const DEFAULT_PRIVACY: PrivacySettings = {
 export const DEFAULT_SETTINGS: RenderSettings = {
   camera_mode: "AUTO",
   horizon_lock: true,
+  horizon_stabilize: 12,
   lut_path: null,
   vignette: 0.5,
   hud: true,
@@ -43,7 +44,9 @@ export const DEFAULT_SETTINGS: RenderSettings = {
   hwaccel_decode: true,
   lens_fov_deg: 200,
   h_fov_deg: 80,
+  roll_offset_deg: 0,
   pitch_offset_deg: -8,
+  lean_offset_deg: 0,
   sound: DEFAULT_SOUND,
   privacy: DEFAULT_PRIVACY,
 };

@@ -1,7 +1,7 @@
 "use client";
 
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
+import { previewMediaUrl } from "@/lib/media";
 import type { AnalysisProgress, AudioMode, MediaItem } from "@/lib/types";
 import { Button, Progress, RadioList, TextField } from "./ui";
 
@@ -37,13 +37,11 @@ function useProxyStill(path: string | null) {
   const [still, setStill] = useState<{ src: string | null; seconds: number | null }>({ src: null, seconds: null });
   useEffect(() => {
     if (!path) return;
-    const url = convertFileSrc(path);
-    if (!url) return;
+    let alive = true;
     const v = document.createElement("video");
     v.muted = true;
     v.crossOrigin = "anonymous";
     v.preload = "metadata";
-    let alive = true;
     v.onloadedmetadata = () => {
       if (!alive) return;
       setStill((s) => ({ ...s, seconds: v.duration }));
@@ -66,7 +64,10 @@ function useProxyStill(path: string | null) {
       v.removeAttribute("src");
       v.load();
     };
-    v.src = url;
+    void previewMediaUrl(path).then((url) => {
+      if (!alive || !url) return;
+      v.src = url;
+    });
     return () => {
       alive = false;
       v.removeAttribute("src");

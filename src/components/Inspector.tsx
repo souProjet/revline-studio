@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { DEFAULT_HUD, HUD_ELEMENTS, type HudElement, type HudOptions } from "@/lib/hud";
-import { DEFAULT_PRIVACY, DEFAULT_SOUND } from "@/lib/settings";
+import { DEFAULT_PRIVACY, DEFAULT_SETTINGS, DEFAULT_SOUND } from "@/lib/settings";
+import { stabiliseLabel } from "@/lib/telemetryView";
 import type { BlurWhen, PrivacySettings, RenderSettings, SoundSettings } from "@/lib/types";
 import { Button, ColorField, Field, Group, Segmented, Slider, Switch, Tabs, TextField } from "./ui";
 
@@ -88,8 +89,46 @@ function ViewTab({ settings: s, setSettings }: Props) {
               : "Looks down the road for the whole clip."}
         </p>
         <Switch label="Horizon Lock" hint="Road stays level while the bike leans" on={s.horizon_lock} set={set("horizon_lock")} />
-        <Slider label="Field of view" unit="°" min={60} max={110} value={s.h_fov_deg} set={set("h_fov_deg")} />
-        <Slider label="Tilt" unit="°" min={-25} max={10} value={s.pitch_offset_deg} set={set("pitch_offset_deg")} />
+        <Slider
+          label="Horizon stabilization"
+          min={0}
+          max={24}
+          step={1}
+          value={s.horizon_stabilize}
+          format={stabiliseLabel}
+          set={set("horizon_stabilize")}
+          disabled={!s.horizon_lock}
+        />
+        <p className="text-[12px] text-muted">
+          {s.horizon_lock
+            ? "Smooths engine vibration on the gyro. Increase if the preview still shakes; lower if corners feel sluggish."
+            : "Enable Horizon Lock to use stabilization."}
+        </p>
+        <Slider
+          label="Field of view (zoom)"
+          unit="°"
+          min={55}
+          max={120}
+          value={s.h_fov_deg}
+          set={set("h_fov_deg")}
+        />
+        <p className="text-[12px] text-muted">Smaller = tighter crop, larger = wider angle.</p>
+      </Group>
+      <Group title="Calibration" aside={reset(() => setSettings((x) => ({ ...x, roll_offset_deg: 0, pitch_offset_deg: DEFAULT_SETTINGS.pitch_offset_deg, lean_offset_deg: 0 })))}>
+        <Slider
+          label="Horizon roll offset"
+          unit="°"
+          min={-20}
+          max={20}
+          step={0.5}
+          value={s.roll_offset_deg}
+          set={set("roll_offset_deg")}
+        />
+        <p className="text-[12px] text-muted">Level the image if the road always looks tilted left or right.</p>
+        <Slider label="View tilt" unit="°" min={-30} max={15} step={0.5} value={s.pitch_offset_deg} set={set("pitch_offset_deg")} />
+        <p className="text-[12px] text-muted">Negative tilts the frame down toward the road.</p>
+        <Slider label="Lean offset" unit="°" min={-20} max={20} step={0.5} value={s.lean_offset_deg} set={set("lean_offset_deg")} />
+        <p className="text-[12px] text-muted">Corrects the lean gauge on the HUD; does not rotate the video.</p>
       </Group>
       <Group title="Look">
         <TextField label="Color LUT (.cube)" value={s.lut_path ?? ""} placeholder="None" onChange={(v) => set("lut_path")(v || null)} />

@@ -82,7 +82,7 @@ export async function renderClip(
       };
       for (let i = 0; i < started.frame_count; i++) {
         if (canceled()) throw new RenderCanceled();
-        drawHud(ctx, track, job.clip.start_ms + (i * 1000) / fps, hud, layout, hideAbove);
+        drawHud(ctx, track, job.clip.start_ms + (i * 1000) / fps, hud, layout, hideAbove, job.settings.lean_offset_deg);
         queue.push(encode());
         if (queue.length >= PIPELINE) await sendOne();
       }

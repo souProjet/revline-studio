@@ -1,6 +1,5 @@
 "use client";
 
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ExportStep from "@/components/ExportStep";
 import HighlightList, { fmtTime } from "@/components/HighlightList";
@@ -25,8 +24,10 @@ import {
   scanMedia,
   systemCheck,
 } from "@/lib/ipc";
+import { previewMediaUrl } from "@/lib/media";
 import { DEFAULT_HUD, DEFAULT_SETTINGS, usePersistentState } from "@/lib/settings";
 import type { AnalysisProgress, AudioMode, CameraAngle, GpuSample, MediaItem, ProjectAnalysis, ProjectSource, SmartClip, SystemInfo } from "@/lib/types";
+import { horizonAt } from "@/lib/telemetryView";
 import { lensFor, viewMatrix } from "@/lib/viewMatrix";
 
 type Step = "ride" | "edit" | "export";
@@ -197,10 +198,23 @@ export default function Studio() {
 
   const viewAt = useCallback(
     (tMs: number) => {
-      const f = track.frames[frameIndexAt(track, tMs)];
-      return viewMatrix(f?.horizon_roll ?? 0, f?.horizon_pitch ?? 0, angleAt(tMs) === "REAR", settings.horizon_lock, settings.pitch_offset_deg);
+      const h = horizonAt(track, tMs, settings.horizon_lock ? settings.horizon_stabilize : 0);
+      return viewMatrix(
+        h.horizon_roll + settings.roll_offset_deg,
+        h.horizon_pitch,
+        angleAt(tMs) === "REAR",
+        settings.horizon_lock,
+        settings.pitch_offset_deg,
+      );
     },
-    [track, angleAt, settings.horizon_lock, settings.pitch_offset_deg],
+  [
+      track,
+      angleAt,
+      settings.horizon_lock,
+      settings.horizon_stabilize,
+      settings.pitch_offset_deg,
+      settings.roll_offset_deg,
+    ],
   );
 
   const speedAt = useCallback((tMs: number) => track.frames[frameIndexAt(track, tMs)]?.speed_kmh ?? 0, [track]);
@@ -216,7 +230,18 @@ export default function Studio() {
     return spans;
   }, [track, pv.speed_limit_kmh]);
 
-  const proxySrc = useMemo(() => (source?.lrv_path ? convertFileSrc(source.lrv_path) : null), [source?.lrv_path]);
+  const [proxySrc, setProxySrc] = useState<string | null>(null);
+  useEffect(() => {
+    if (!source?.lrv_path) {
+      setProxySrc(null);
+      return;
+    }
+    let alive = true;
+    previewMediaUrl(source.lrv_path).then((url) => alive && setProxySrc(url));
+    return () => {
+      alive = false;
+    };
+  }, [source?.lrv_path]);
 
   const renderQueued = async () => {
     if (!source) return;
@@ -453,6 +478,7 @@ export default function Studio() {
                   options={hud}
                   layout={layout}
                   hideSpeedAbove={pv.hide_hud_speed ? pv.speed_limit_kmh : null}
+                  leanOffsetDeg={settings.lean_offset_deg}
                   showSafeZones={safeZones}
                   editable={arranging}
                   onMove={(el, off) => setHud((h) => ({ ...h, offset: { ...h.offset, [layout.aspect]: { ...h.offset[layout.aspect], [el]: off } } }))}

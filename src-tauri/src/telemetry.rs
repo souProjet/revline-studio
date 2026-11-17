@@ -285,7 +285,8 @@ pub fn build_frames(raw: &RawTelemetry, audio: &[HudAudioFrame]) -> (Vec<Telemet
         g_lon[i] = dot(s.a_kin, fwd) / G;
         g_lat[i] = dot(s.a_kin, right) / G;
     }
-    // CP3 vibration: 150 ms on lean display, 300 ms on g-forces. Horizon Lock stays raw.
+    // CP3 vibration: 150 ms on lean display, 300 ms on g-forces. Horizon Lock is smoothed at
+    // read time via `horizon_at` (user-tunable stabilisation).
     let lean = smooth(&roll, 4);
     let g_lon = smooth(&g_lon, 9);
     let g_lat = smooth(&g_lat, 9);
@@ -323,6 +324,29 @@ pub fn build_frames(raw: &RawTelemetry, audio: &[HudAudioFrame]) -> (Vec<Telemet
         warning,
     };
     (frames, summary)
+}
+
+/// Rolling mean over `half` frames at 60 Hz (~`half * 2 / 60` s window). `half == 0` = raw IMU.
+pub fn horizon_at(telemetry: &[TelemetryFrame], t_ms: f64, half: usize) -> (f64, f64) {
+    let n = telemetry.len();
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let i = ((t_ms * TELEMETRY_HZ / 1000.0).round() as usize).min(n - 1);
+    if half == 0 {
+        let f = &telemetry[i];
+        return (f.horizon_roll, f.horizon_pitch);
+    }
+    let lo = i.saturating_sub(half);
+    let hi = (i + half).min(n - 1);
+    let cnt = (hi - lo + 1) as f64;
+    let mut roll = 0.0;
+    let mut pitch = 0.0;
+    for f in &telemetry[lo..=hi] {
+        roll += f.horizon_roll;
+        pitch += f.horizon_pitch;
+    }
+    (roll / cnt, pitch / cnt)
 }
 
 /// The view rotation for Horizon Lock, shared by the render (v360 yaw/pitch/roll) and the
@@ -370,6 +394,27 @@ mod tests {
         assert!(p.abs() < 1e-9 && (r.abs() - 40.0).abs() < 1e-9);
         let (_, _, r_rear) = v360_ypr(&view_matrix(40.0, 0.0, true, true));
         assert!((r + r_rear).abs() < 1e-9);
+    }
+
+    #[test]
+    fn horizon_at_averages() {
+        let mk = |r: f64| TelemetryFrame {
+            timestamp_ms: 0.0,
+            lean_angle: 0.0,
+            horizon_roll: r,
+            horizon_pitch: 0.0,
+            g_lon: 0.0,
+            g_lat: 0.0,
+            speed_kmh: 0.0,
+            lat: 0.0,
+            lon: 0.0,
+            audio_rms: 0.0,
+            spectrum_bars: [0.0; SPECTRUM_BARS],
+        };
+        let tel: Vec<_> = (0..5).map(|i| mk(i as f64)).collect();
+        let (r, _) = horizon_at(&tel, 0.0, 1);
+        assert!((r - 0.5).abs() < 1e-6);
+        assert_eq!(horizon_at(&tel, 0.0, 0).0, 0.0);
     }
 
     #[test]

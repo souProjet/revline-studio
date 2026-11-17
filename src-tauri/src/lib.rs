@@ -2,6 +2,7 @@
 
 pub mod audio_analyzer;
 pub mod ingest;
+pub mod media_proxy;
 pub mod plates;
 pub mod render_pipeline;
 pub mod system;
@@ -35,6 +36,7 @@ fn err(e: anyhow::Error) -> String {
 
 #[derive(Default)]
 struct AppState {
+    media: Mutex<Option<Arc<media_proxy::MediaProxy>>>,
     /// Full 60 Hz series of the analyzed source; the UI pulls clip-sized windows.
     telemetry: Mutex<Vec<TelemetryFrame>>,
     renders: Mutex<HashMap<String, RenderProcess>>,
@@ -143,6 +145,23 @@ async fn analyze_project(app: AppHandle, state: State<'_, AppState>, source: Pro
     *state.telemetry.lock().await = frames;
     stage_reporter(&app, "Done", 1.0, 1.0)(1.0);
     Ok(analysis)
+}
+
+#[tauri::command]
+async fn preview_media_url(state: State<'_, AppState>, path: PathBuf) -> CmdResult<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let proxy = state.media.lock().await;
+        let Some(proxy) = proxy.as_ref() else {
+            return Err("media proxy not started".into());
+        };
+        return proxy.url_for(&path).await.map_err(err);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (state, path);
+        Err("preview_media_url: use convertFileSrc on this platform".into())
+    }
 }
 
 #[tauri::command]
@@ -283,10 +302,23 @@ async fn render_cancel(state: State<'_, AppState>, job_id: String) -> CmdResult<
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|app| {
+            let state = app.state::<AppState>();
+            tauri::async_runtime::block_on(async {
+                #[cfg(target_os = "linux")]
+                {
+                    let proxy = media_proxy::MediaProxy::start().await.map_err(|e| e.to_string())?;
+                    *state.media.lock().await = Some(proxy);
+                }
+                Ok::<(), String>(())
+            })?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             system_check,
             scan_media,
             analyze_project,
+            preview_media_url,
             get_telemetry_window,
             render_start,
             render_push_hud_frame,

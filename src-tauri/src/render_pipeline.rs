@@ -153,6 +153,8 @@ pub struct PrivacySettings {
 pub struct RenderSettings {
     pub camera_mode: CameraMode,
     pub horizon_lock: bool,
+    /// Rolling-mean half-width at 60 Hz for Horizon Lock (0 = raw gyro, 12 ≈ 400 ms).
+    pub horizon_stabilize: u8,
     /// `.cube` 3D LUT (Flat profile -> Moody Asphalt).
     pub lut_path: Option<PathBuf>,
     /// 0..1, 0.5 = `vignette=PI/4`.
@@ -169,8 +171,12 @@ pub struct RenderSettings {
     pub lens_fov_deg: f64,
     /// Field of view across the short side of the frame, so every aspect keeps the same zoom.
     pub h_fov_deg: f64,
+    /// Added to gyro roll before Horizon Lock.
+    pub roll_offset_deg: f64,
     /// Constant view tilt, negative = look down at the road.
     pub pitch_offset_deg: f64,
+    /// Added to telemetry lean on the HUD.
+    pub lean_offset_deg: f64,
     pub sound: SoundSettings,
     pub privacy: PrivacySettings,
 }
@@ -256,8 +262,9 @@ fn angle_at(clip: &SmartClip, mode: CameraMode, t_ms: f64) -> CameraAngle {
 /// v360 yaw/pitch/roll for absolute source time `t_ms`.
 fn view_ypr(job: &RenderJob, telemetry: &[TelemetryFrame], t_ms: f64) -> (f64, f64, f64) {
     let s = &job.settings;
-    let f = telemetry.get((t_ms * TELEMETRY_HZ / 1000.0).round() as usize);
-    let (roll, pitch) = f.map_or((0.0, 0.0), |f| (f.horizon_roll, f.horizon_pitch));
+    let half = s.horizon_stabilize as usize;
+    let (mut roll, pitch) = crate::telemetry::horizon_at(telemetry, t_ms, half);
+    roll += s.roll_offset_deg;
     let rear = angle_at(&job.clip, s.camera_mode, t_ms) == CameraAngle::Rear;
     let m = view_matrix(roll, pitch, rear, s.horizon_lock);
     // Constant tilt in view space: M · Rx(offset).
@@ -972,9 +979,18 @@ mod tests {
                 },
                 output_path: dir.join(format!("out-{w}x{h}.mp4")),
                 settings: RenderSettings {
-                    camera_mode: CameraMode::Auto, horizon_lock: true, lut_path: None, vignette: 0.5,
+                    camera_mode: CameraMode::Auto,
+                    horizon_lock: true,
+                    horizon_stabilize: 12,
+                    lut_path: None,
+                    vignette: 0.5,
                     hud: false, codec: VideoCodec::H264, quality: Quality::High, width: w, height: h, fps, hwaccel_decode: true,
-                    lens_fov_deg: 200.0, h_fov_deg: 80.0, pitch_offset_deg: -8.0, sound: default_sound(),
+                    lens_fov_deg: 200.0,
+                    h_fov_deg: 80.0,
+                    roll_offset_deg: 0.0,
+                    pitch_offset_deg: -8.0,
+                    lean_offset_deg: 0.0,
+                    sound: default_sound(),
                 privacy: PrivacySettings {
                     speed_limit_kmh: 90.0, hide_hud_speed: true,
                     // With REVLINE_PLATE_MODEL set, runs the detection pass (finds nothing here).

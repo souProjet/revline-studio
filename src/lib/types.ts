@@ -147,6 +147,8 @@ export interface PrivacySettings {
 export interface RenderSettings {
   camera_mode: CameraMode;
   horizon_lock: boolean;
+  /** Rolling-mean half-width at 60 Hz for Horizon Lock (0 = raw, 12 ≈ 400 ms). */
+  horizon_stabilize: number;
   lut_path: string | null;
   /** 0..1, 0.5 = vignette=PI/4 */
   vignette: number;
@@ -160,7 +162,11 @@ export interface RenderSettings {
   hwaccel_decode: boolean;
   lens_fov_deg: number;
   h_fov_deg: number;
+  /** Added to gyro roll before Horizon Lock (level the preview). */
+  roll_offset_deg: number;
   pitch_offset_deg: number;
+  /** Added to telemetry lean on the HUD (does not rotate the video). */
+  lean_offset_deg: number;
   sound: SoundSettings;
   privacy: PrivacySettings;
 }
